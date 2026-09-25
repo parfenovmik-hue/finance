@@ -1,10 +1,17 @@
-// Кэш оболочки приложения, чтобы оно открывалось без интернета.
+// Кэш приложения для работы без интернета.
+// Стратегия: сначала сеть (всегда свежая версия), при отсутствии связи — кэш.
 // При изменении файлов увеличь номер версии.
-const CACHE = 'finpanel-v2';
+const CACHE = 'finpanel-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
+const NETWORK_TIMEOUT = 3500;
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' — мимо HTTP-кэша браузера, чтобы не сохранить старые файлы
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(SHELL.map((u) => new Request(u, { cache: 'reload' }))))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -15,17 +22,23 @@ self.addEventListener('activate', (e) => {
   );
 });
 
-// Свои файлы: отдаём из кэша сразу и обновляем в фоне. Чужие запросы (таблица, курс) не трогаем.
+// Свои файлы: пробуем сеть, при ошибке или долгом ответе отдаём кэш. Чужие запросы не трогаем.
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
-  e.respondWith(
-    caches.open(CACHE).then(async (cache) => {
-      const cached = await cache.match(e.request, { ignoreSearch: true });
-      const network = fetch(e.request)
-        .then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; })
-        .catch(() => cached);
-      return cached || network;
-    })
-  );
+  e.respondWith((async () => {
+    const cache = await caches.open(CACHE);
+    const network = fetch(e.request, { cache: 'no-cache' }).then((res) => {
+      if (res.ok) cache.put(e.request, res.clone());
+      return res;
+    });
+    network.catch(() => {});
+    const timeout = new Promise((resolve) => setTimeout(resolve, NETWORK_TIMEOUT));
+    try {
+      const res = await Promise.race([network, timeout]);
+      if (res) return res;
+    } catch (err) { /* нет сети */ }
+    const cached = await cache.match(e.request, { ignoreSearch: true });
+    return cached || network;
+  })());
 });

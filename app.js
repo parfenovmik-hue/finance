@@ -6,7 +6,7 @@
    через Apps Script (см. google-apps-script/Code.gs).
    ========================================================= */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.1.1';
 
 /* ---------------- Утилиты ---------------- */
 
@@ -1302,8 +1302,24 @@ async function init() {
   if (s.syncUrl) scheduleSync(600);
 }
 
+// Обновления: проверяем при каждом возврате в приложение; новая версия
+// перезагружает страницу сама (если не открыта форма — тогда при сворачивании).
+let pendingReload = false;
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
-  navigator.serviceWorker.register('sw.js').catch(() => {});
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js').then((reg) => {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') reg.update().catch(() => {});
+    });
+  }).catch(() => {});
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController || pendingReload) return;
+    pendingReload = true;
+    if (!ui.sheets.length) location.reload();
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (pendingReload && document.visibilityState === 'hidden') location.reload();
+  });
 }
 
 init();
