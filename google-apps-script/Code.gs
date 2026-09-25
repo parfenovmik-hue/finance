@@ -29,16 +29,16 @@ const SHEETS = {
   },
   categories: {
     name: 'Категории',
-    cols: [['emoji', 'Эмодзи'], ['name', 'Название'], ['kind', 'Тип'],
+    cols: [['name', 'Название'], ['kind', 'Тип'], ['icon', 'Значок'], ['emoji', 'Эмодзи'],
       ['id', 'id'], ['order', 'order'], ['updatedAt', 'updatedAt'], ['deleted', 'deleted']],
   },
   debts: {
     name: 'Долги',
-    cols: [['name', 'Название'], ['direction', 'Направление'], ['currency', 'Валюта'], ['initial', 'Остаток на старте'], ['note', 'Заметка'],
+    cols: [['name', 'Название'], ['direction', 'Направление'], ['creditor', 'Кому'], ['currency', 'Валюта'], ['initial', 'Остаток на старте'], ['note', 'Заметка'],
       ['id', 'id'], ['updatedAt', 'updatedAt'], ['deleted', 'deleted']],
   },
 };
-const TEXT_KEYS = ['id', 'type', 'account', 'category', 'toAccount', 'debt', 'debtAction', 'note', 'name', 'emoji', 'kind', 'direction', 'currency',
+const TEXT_KEYS = ['id', 'type', 'account', 'category', 'toAccount', 'debt', 'debtAction', 'note', 'name', 'emoji', 'icon', 'kind', 'direction', 'creditor', 'currency',
   'typeName', 'accountName', 'categoryName', 'toAccountName', 'toCurrency', 'debtName', 'debtActionName'];
 
 function doGet() {

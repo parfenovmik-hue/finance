@@ -6,7 +6,7 @@
    через Apps Script (см. google-apps-script/Code.gs).
    ========================================================= */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 
 /* ---------------- Утилиты ---------------- */
 
@@ -17,6 +17,9 @@ const pad = (n) => String(n).padStart(2, '0');
 const ymd = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const monthOf = (dateStr) => String(dateStr).slice(0, 7);
 const byOrder = (a, b) => (a.order || 0) - (b.order || 0);
+// Счета: сначала рублёвые, потом USDT, внутри — по порядку добавления
+const CUR_ORDER = { RUB: 0, USDT: 1 };
+const byAcc = (a, b) => (CUR_ORDER[a.currency] ?? 9) - (CUR_ORDER[b.currency] ?? 9) || byOrder(a, b);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
 function parseNum(v) {
@@ -71,6 +74,44 @@ const ICON = {
   sync: '<svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20v-4h-4"/></svg>',
 };
 
+// Линейные иконки категорий (24×24, обводка)
+const CAT_ICONS = {
+  cart: '<circle cx="9" cy="20" r="1.3"/><circle cx="18" cy="20" r="1.3"/><path d="M2.5 3h2.6l2.4 12h11l2-8H6.2"/>',
+  bag: '<path d="M5 7h14l-1 14H6z"/><path d="M9 7a3 3 0 0 1 6 0"/>',
+  cup: '<path d="M4 9h13v5a5 5 0 0 1-5 5H9a5 5 0 0 1-5-5z"/><path d="M17 11h1.5a2.5 2.5 0 0 1 0 5H17M8 3v3M12 3v3"/>',
+  food: '<path d="M5 3v7a2 2 0 0 0 4 0V3M7 12v9M17 21V3c-2 1-3 3.5-3 7h3"/>',
+  bus: '<rect x="4" y="3" width="16" height="15" rx="3"/><path d="M4 11h16M8 21v-3M16 21v-3"/><circle cx="8" cy="14.5" r=".8"/><circle cx="16" cy="14.5" r=".8"/>',
+  fuel: '<path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M3 21h12M4 10h10M14 8h2a2 2 0 0 1 2 2v6a1.5 1.5 0 0 0 3 0V8l-3-3"/>',
+  plane: '<path d="M22 16v-2l-8.5-5V3.5a1.5 1.5 0 0 0-3 0V9L2 14v2l8.5-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5l-2-1.5v-5.5z"/>',
+  home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/>',
+  bolt: '<path d="M13 2 4 14h7l-1 8 9-12h-7z"/>',
+  phone: '<rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M11 18.5h2"/>',
+  repeat: '<path d="M17 2l3 3-3 3M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3M20 13v2a4 4 0 0 1-4 4H4"/>',
+  health: '<rect x="3" y="3" width="18" height="18" rx="4"/><path d="M12 8v8M8 12h8"/>',
+  heart: '<path d="M12 20s-7.5-4.6-7.5-10A4.5 4.5 0 0 1 12 7a4.5 4.5 0 0 1 7.5 3c0 5.4-7.5 10-7.5 10z"/>',
+  scissors: '<circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8 7.5 20 18M8 16.5 20 6"/>',
+  shirt: '<path d="M8 3 3 6l2 4 2-1v12h10V9l2 1 2-4-5-3a4 4 0 0 1-8 0z"/>',
+  sport: '<path d="M6 7v10M18 7v10M3 10v4M21 10v4M6 12h12"/>',
+  star: '<path d="m12 3 2.7 5.6 6.1.9-4.4 4.3 1 6.1L12 17l-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z"/>',
+  film: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4"/>',
+  gift: '<rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v9h14v-9M12 8v13M12 8S10.5 3 8 3.5 7 8 12 8zM12 8s1.5-5 4-4.5S17 8 12 8z"/>',
+  book: '<path d="M4 4.5A1.5 1.5 0 0 1 5.5 3H20v15H5.5A1.5 1.5 0 0 0 4 19.5zM4 19.5A1.5 1.5 0 0 0 5.5 21H20v-3"/>',
+  paw: '<circle cx="7" cy="10" r="1.8"/><circle cx="12" cy="7" r="1.8"/><circle cx="17" cy="10" r="1.8"/><path d="M8 17c0-2.5 1.8-4.5 4-4.5s4 2 4 4.5a2 2 0 0 1-2 2h-4a2 2 0 0 1-2-2z"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  doc: '<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8z"/><path d="M14 3v5h5M9 13h6M9 17h6"/>',
+  tag: '<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="7.5" cy="7.5" r="1.3"/>',
+  briefcase: '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M3 13h18"/>',
+  laptop: '<rect x="5" y="4" width="14" height="11" rx="1.5"/><path d="M2.5 19h19"/>',
+  percent: '<path d="M19 5 5 19"/><circle cx="7" cy="7" r="2.5"/><circle cx="17" cy="17" r="2.5"/>',
+  coins: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"/>',
+  trend: '<path d="M3 17l6-6 4 4 8-8M15 7h6v6"/>',
+  bank: '<path d="M3 9.5 12 4l9 5.5M5 10v8M9.5 10v8M14.5 10v8M19 10v8M3 20.5h18"/>',
+  box: '<path d="M3 7.5 12 3l9 4.5v9L12 21l-9-4.5z"/><path d="M3 7.5 12 12l9-4.5M12 12v9"/>',
+};
+const EMOJI_TO_ICON = { '🛒': 'cart', '☕': 'cup', '🚕': 'bus', '🏠': 'home', '📱': 'phone', '💊': 'health', '👕': 'shirt', '🎉': 'star', '🎁': 'gift', '✈️': 'plane', '📚': 'book', '📦': 'box', '💼': 'briefcase', '💻': 'laptop', '💸': 'percent' };
+const svgIcon = (k) => `<svg viewBox="0 0 24 24">${CAT_ICONS[k] || CAT_ICONS.box}</svg>`;
+const catIcon = (c) => (c && !c.icon && c.emoji ? esc(c.emoji) : svgIcon(c?.icon));
+
 /* ---------------- Хранилище (IndexedDB с запасным localStorage) ---------------- */
 
 const Store = {
@@ -115,7 +156,7 @@ const Store = {
 
 const KINDS = ['accounts', 'categories', 'debts', 'txs'];
 let state;
-const ui = { tab: 'home', month: monthOf(ymd()), histAccount: '', sync: { status: 'idle', msg: '' }, sheets: [] };
+const ui = { reveal: false, tab: 'home', month: monthOf(ymd()), histAccount: '', sync: { status: 'idle', msg: '' }, sheets: [] };
 
 function defaultSettings() {
   return { rate: 0, rateAuto: true, rateAt: 0, syncUrl: '', syncSecret: '', lastSync: 0, last: {}, quietDays: [], hideInstallTip: false };
@@ -124,9 +165,9 @@ function defaultSettings() {
 function defaultState() {
   const now = Date.now();
   const mk = (p, o, i) => ({ id: uid(p), ...o, order: i, updatedAt: now, deleted: false, _dirty: true });
-  const exp = [['🛒', 'Продукты'], ['☕', 'Кафе и рестораны'], ['🚕', 'Транспорт'], ['🏠', 'Жильё'], ['📱', 'Связь и подписки'], ['💊', 'Здоровье'],
-    ['👕', 'Одежда'], ['🎉', 'Развлечения'], ['🎁', 'Подарки'], ['✈️', 'Путешествия'], ['📚', 'Обучение'], ['📦', 'Другое']];
-  const inc = [['💼', 'Зарплата'], ['💻', 'Подработка'], ['💸', 'Кэшбэк и %'], ['🎁', 'Подарки'], ['📦', 'Другое']];
+  const exp = [['cart', 'Продукты'], ['cup', 'Кафе и рестораны'], ['bus', 'Транспорт'], ['home', 'Жильё'], ['phone', 'Связь и подписки'], ['health', 'Здоровье'],
+    ['shirt', 'Одежда'], ['star', 'Развлечения'], ['gift', 'Подарки'], ['plane', 'Путешествия'], ['book', 'Обучение'], ['box', 'Другое']];
+  const inc = [['briefcase', 'Зарплата'], ['laptop', 'Подработка'], ['percent', 'Кэшбэк и %'], ['gift', 'Подарки'], ['box', 'Другое']];
   return {
     v: 1,
     accounts: [
@@ -135,8 +176,8 @@ function defaultState() {
       mk('a', { name: 'USDT', currency: 'USDT', initial: 0, archived: false }, 2),
     ],
     categories: [
-      ...exp.map(([e, n], i) => mk('c', { name: n, emoji: e, kind: 'expense' }, i)),
-      ...inc.map(([e, n], i) => mk('c', { name: n, emoji: e, kind: 'income' }, i)),
+      ...exp.map(([ic, n], i) => mk('c', { name: n, icon: ic, emoji: '', kind: 'expense' }, i)),
+      ...inc.map(([ic, n], i) => mk('c', { name: n, icon: ic, emoji: '', kind: 'income' }, i)),
     ],
     debts: [],
     txs: [],
@@ -283,11 +324,11 @@ async function refreshRate(manual) {
 
 const FIELDS = {
   accounts: { s: ['id', 'name', 'currency'], n: ['initial', 'order', 'updatedAt'], b: ['archived', 'deleted'] },
-  categories: { s: ['id', 'name', 'emoji', 'kind'], n: ['order', 'updatedAt'], b: ['deleted'] },
-  debts: { s: ['id', 'name', 'currency', 'direction', 'note'], n: ['initial', 'updatedAt'], b: ['deleted'] },
+  categories: { s: ['id', 'name', 'emoji', 'icon', 'kind'], n: ['order', 'updatedAt'], b: ['deleted'] },
+  debts: { s: ['id', 'name', 'currency', 'direction', 'creditor', 'note'], n: ['initial', 'updatedAt'], b: ['deleted'] },
   txs: { s: ['id', 'type', 'date', 'account', 'category', 'toAccount', 'debt', 'debtAction', 'note'], n: ['amount', 'toAmount', 'debtAmount', 'createdAt', 'updatedAt'], b: ['deleted'] },
 };
-const TYPE_RU = { expense: 'Расход', income: 'Доход', transfer: 'Перевод', debt: 'Долг' };
+const TYPE_RU = { expense: 'Расход', income: 'Доход', transfer: 'Между счетами', debt: 'Долг' };
 
 function norm(k, r) {
   const f = FIELDS[k], o = {};
@@ -477,7 +518,7 @@ function txRow(t) {
   let ico, cls = '', title, meta, amt, amtCls = '', sub = '';
   if (t.type === 'expense' || t.type === 'income') {
     const c = byId('categories', t.category);
-    ico = esc(c?.emoji || '•');
+    ico = catIcon(c);
     cls = t.type === 'income' ? 'inc' : '';
     title = esc(c?.name || 'Без категории');
     meta = esc(a?.name || '—');
@@ -487,7 +528,7 @@ function txRow(t) {
     const b = byId('accounts', t.toAccount);
     const tc = b?.currency || 'RUB';
     ico = ICON.transfer; cls = 'trf';
-    title = tc !== cur ? 'Обмен' : 'Перевод';
+    title = tc !== cur ? 'Обмен' : 'Между счетами';
     meta = esc(`${a?.name || '—'} → ${b?.name || '—'}`);
     amt = fmt(t.amount, cur);
     if (tc !== cur) sub = '→ ' + fmt(t.toAmount, tc);
@@ -521,15 +562,12 @@ function viewHome() {
   const s = state.settings;
   const st = monthStats(monthOf(ymd()));
   const sk = streakInfo();
-  const accs = live('accounts').filter((a) => !a.archived).sort(byOrder);
+  const accs = live('accounts').filter((a) => !a.archived).sort(byAcc);
   const hasUsdt = live('accounts').some((a) => a.currency === 'USDT' && Math.abs(T.bal[a.id]) > 0.004);
   const recent = live('txs').sort(sortTx).slice(0, 5);
   const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
   const syncCls = { ok: 'ok', error: 'err', busy: 'wait' }[ui.sync.status] || '';
-
-  const subParts = [];
-  if (hasUsdt) subParts.push(`${fmt(T.rub, 'RUB')} + ${fmt(T.usdt, 'USDT')}`);
-  if (T.owe || T.lent) subParts.push(`чистыми ${fmtRub(T.total - T.owe + T.lent)}`);
+  const mask = ui.reveal ? '' : 'masked';
 
   return `
   <div class="topbar">
@@ -541,40 +579,39 @@ function viewHome() {
   </div>
 
   <div class="card hero">
-    <div class="label">На всех счетах</div>
-    <div class="big num">${fmtRub(T.total)}</div>
-    <div class="sub num">${subParts.join(' · ') || '&nbsp;'}</div>
+    <div class="hero-head"><span class="label">На всех счетах</span><span class="label">${MONTHS[new Date().getMonth()]}</span></div>
+    <button class="big num ${mask}" data-act="reveal" aria-label="${ui.reveal ? 'Скрыть сумму' : 'Показать сумму'}">${fmtRub(T.total)}</button>
+    ${hasUsdt ? `<div class="sub num ${mask}">${fmt(T.rub, 'RUB')} + ${fmt(T.usdt, 'USDT')}</div>` : ''}
     ${hasUsdt && !s.rate ? `<div class="hint warn">Укажи курс USDT в настройках, чтобы посчитать итог</div>` : ''}
-    <div class="hero-grid">
-      <div><div class="k">Доходы, ${MONTHS_SHORT[new Date().getMonth()]}</div><div class="v num pos">${fmtRub(st.inc)}</div></div>
+    <div class="hero-grid cols-2">
+      <div><div class="k">Доходы</div><div class="v num pos">${fmtRub(st.inc)}</div></div>
       <div><div class="k">Расходы</div><div class="v num">${fmtRub(st.exp)}</div></div>
-      <div><div class="k">Я должен</div><div class="v num ${T.owe ? 'dbt' : ''}">${fmtRub(T.owe)}</div></div>
     </div>
     <div class="streak">
-      <span>🔥 Серия: <b>${sk.n} ${plural(sk.n, ['день', 'дня', 'дней'])}</b></span>
+      <span>Серия: <b>${sk.n} ${plural(sk.n, ['день', 'дня', 'дней'])}</b></span>
       <span class="dots">${sk.last7.map((x) => `<i class="${x ? 'on' : ''}"></i>`).join('')}</span>
     </div>
-    ${!sk.today && new Date().getHours() >= 18 ? `<button class="btn secondary small" data-act="quiet-day">Сегодня трат не было ✓</button>` : ''}
+    ${!sk.today && new Date().getHours() >= 18 ? `<button class="btn secondary small" data-act="quiet-day">Сегодня трат не было</button>` : ''}
   </div>
 
-  ${!standalone && !s.hideInstallTip ? `<div class="card install-tip"><div>📲 <b>Установи на экран «Домой»:</b> в Safari нажми «Поделиться» → «На экран Домой». Так приложение откроется на весь экран и будет работать без интернета.</div><button data-act="hide-tip" aria-label="Скрыть">×</button></div>` : ''}
+  ${!standalone && !s.hideInstallTip ? `<div class="card install-tip"><div><b>Установи на экран «Домой»:</b> в Safari нажми «Поделиться» → «На экран Домой». Так приложение откроется на весь экран и будет работать без интернета.</div><button data-act="hide-tip" aria-label="Скрыть">×</button></div>` : ''}
 
   <div class="section-title"><span>Счета</span><button data-act="accounts">Изменить</button></div>
   <div class="card">
     ${accs.map((a) => `<button class="row plain" data-act="open-account" data-id="${a.id}">
-      <div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${a.currency === 'USDT' && s.rate ? '≈ ' + fmtRub(toRub(T.bal[a.id], 'USDT')) : a.currency}</div></div>
-      <div class="amt num ${T.bal[a.id] < 0 ? 'neg' : ''}">${fmt(T.bal[a.id], a.currency)}</div><span class="chev">›</span>
+      <div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${a.currency === 'USDT' && s.rate ? `<span class="${mask}">≈ ${fmtRub(toRub(T.bal[a.id], 'USDT'))}</span>` : a.currency}</div></div>
+      <div class="amt num ${mask} ${T.bal[a.id] < 0 ? 'neg' : ''}">${fmt(T.bal[a.id], a.currency)}</div><span class="chev">›</span>
     </button>`).join('') || `<div class="empty">Нет счетов</div>`}
   </div>
 
   <div class="section-title"><span>Последние операции</span>${recent.length ? `<button data-act="tab" data-tab="history">Все</button>` : ''}</div>
   <div class="card">
-    ${recent.map(txRow).join('') || `<div class="empty"><div class="e-ico">✍️</div>Пока пусто. Нажми <b>+</b> внизу, чтобы записать первую операцию.</div>`}
+    ${recent.map(txRow).join('') || `<div class="empty">Пока пусто. Нажми <b>+</b> внизу, чтобы записать первую операцию.</div>`}
   </div>`;
 }
 
 function viewHistory() {
-  const accs = live('accounts').sort(byOrder);
+  const accs = live('accounts').sort(byAcc);
   const list = live('txs')
     .filter((t) => monthOf(t.date) === ui.month)
     .filter((t) => !ui.histAccount || t.account === ui.histAccount || t.toAccount === ui.histAccount)
@@ -595,16 +632,17 @@ function viewHistory() {
     const spent = g.items.filter((t) => t.type === 'expense').reduce((s, t) => s + toRub(t.amount, txCur(t)), 0);
     return `<div class="day-head"><span>${dayLabel(g.date)}</span><span class="num">${spent ? '−' + fmtRub(spent) : ''}</span></div>
       <div class="card">${g.items.map(txRow).join('')}</div>`;
-  }).join('') || `<div class="card" style="margin-top:14px"><div class="empty"><div class="e-ico">🗓</div>В этом месяце операций нет</div></div>`}`;
+  }).join('') || `<div class="card" style="margin-top:14px"><div class="empty">В этом месяце операций нет</div></div>`}`;
 }
+
+const debtGroup = (d) => (d.direction === 'lent' ? 'lent' : d.creditor === 'person' ? 'person' : 'bank');
 
 function viewDebts() {
   const ds = debtStats();
   const all = live('debts');
-  const open = all.filter((d) => ds[d.id].rest > 0.004);
-  const closed = all.filter((d) => ds[d.id].rest <= 0.004);
-  let owe = 0, lent = 0;
-  for (const d of open) { const v = toRub(ds[d.id].rest, d.currency); d.direction === 'lent' ? (lent += v) : (owe += v); }
+  const isOpen = (d) => ds[d.id].rest > 0.004;
+  const sum = { bank: 0, person: 0, lent: 0 };
+  for (const d of all) if (isOpen(d)) sum[debtGroup(d)] += toRub(ds[d.id].rest, d.currency);
 
   const card = (d) => {
     const x = ds[d.id];
@@ -615,22 +653,30 @@ function viewDebts() {
       <div class="top"><button class="name" data-act="debt-edit" data-id="${d.id}">${esc(d.name)} <span class="chev" style="color:var(--faint)">›</span></button>
       <div class="rest num ${x.rest > 0.004 ? (lentD ? 'pos' : 'dbt') : ''}">${fmt(Math.max(0, x.rest), d.currency)}</div></div>
       <div class="progress"><i style="width:${pct.toFixed(1)}%"></i></div>
-      <div class="foot"><span>${lentD ? 'Мне должны' : 'Я должен'}${d.note ? ' · ' + esc(d.note) : ''}</span><span class="num">${lentD ? 'вернули' : 'выплачено'} ${fmt(x.paid, d.currency)} · ${Math.round(pct)}%</span></div>
+      <div class="foot"><span>${esc(d.note)}</span><span class="num">${lentD ? 'вернули' : 'выплачено'} ${fmt(x.paid, d.currency)} · ${Math.round(pct)}%</span></div>
       ${x.rest > 0.004 ? `<div class="actions">
         <button data-act="debt-tx" data-id="${d.id}" data-a="pay">${lentD ? 'Мне вернули' : 'Внести платёж'}</button>
         <button data-act="debt-tx" data-id="${d.id}" data-a="add">${lentD ? 'Дать ещё' : 'Занять ещё'}</button>
       </div>` : ''}
     </div>`;
   };
+  const section = (key, title) => {
+    const list = all.filter((d) => isOpen(d) && debtGroup(d) === key);
+    return list.length ? `<div class="section-title"><span>${title}</span><span class="num">${fmtRub(sum[key])}</span></div><div class="card">${list.map(card).join('')}</div>` : '';
+  };
+  const closed = all.filter((d) => !isOpen(d));
 
   return `
-  <div class="topbar"><h1>Долги</h1></div>
-  <div class="kpis">
-    <div class="card kpi"><div class="k">Я должен</div><div class="v num ${owe ? 'dbt' : ''}">${fmtRub(owe)}</div></div>
-    <div class="card kpi"><div class="k">Мне должны</div><div class="v num ${lent ? 'pos' : ''}">${fmtRub(lent)}</div></div>
+  <div class="topbar"><h1>Долги</h1><button class="icon-btn" data-act="debt-new" aria-label="Добавить долг"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button></div>
+  <div class="card hero">
+    <div class="hero-grid" style="margin-top:0;padding-top:0;border-top:0">
+      <div><div class="k">Банкам</div><div class="v num ${sum.bank ? 'dbt' : ''}">${fmtRub(sum.bank)}</div></div>
+      <div><div class="k">Людям</div><div class="v num ${sum.person ? 'dbt' : ''}">${fmtRub(sum.person)}</div></div>
+      <div><div class="k">Мне должны</div><div class="v num ${sum.lent ? 'pos' : ''}">${fmtRub(sum.lent)}</div></div>
+    </div>
   </div>
-  <div class="section-title"><span>Активные</span><button data-act="debt-new">+ Добавить</button></div>
-  <div class="card">${open.map(card).join('') || `<div class="empty"><div class="e-ico">🎉</div>Долгов нет. Если есть кредит или займ — добавь его, чтобы следить за остатком.</div>`}</div>
+  ${section('bank', 'Банкам')}${section('person', 'Людям')}${section('lent', 'Мне должны')}
+  ${!all.some(isOpen) ? `<div class="card" style="margin-top:14px"><div class="empty">Активных долгов нет. Если есть кредит, рассрочка или займ, добавь его, чтобы следить за остатком.<button class="btn small" data-act="debt-new">Добавить долг</button></div></div>` : ''}
   ${closed.length ? `<div class="section-title"><span>Закрытые</span></div><div class="card">${closed.map(card).join('')}</div>` : ''}`;
 }
 
@@ -644,7 +690,7 @@ function viewReport() {
     return entries.map(([id, v]) => {
       const c = byId('categories', id);
       const p = total ? (v / total) * 100 : 0;
-      return `<div class="bar-row"><div class="bar-top"><span>${esc(c?.emoji || '•')} ${esc(c?.name || 'Без категории')}</span><span class="num">${fmtRub(v)}<span class="pct">${Math.round(p)}%</span></span></div><div class="bar ${cls}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
+      return `<div class="bar-row"><div class="bar-top"><span class="bar-name"><span class="bar-ico">${catIcon(c)}</span>${esc(c?.name || 'Без категории')}</span><span class="num">${fmtRub(v)}<span class="pct">${Math.round(p)}%</span></span></div><div class="bar ${cls}"><i style="width:${p.toFixed(1)}%"></i></div></div>`;
     }).join('');
   };
 
@@ -691,7 +737,7 @@ function render() {
 /* ---------------- Форма операции ---------------- */
 
 function firstAccount(exclude) {
-  return live('accounts').filter((a) => !a.archived && a.id !== exclude).sort(byOrder)[0]?.id || '';
+  return live('accounts').filter((a) => !a.archived && a.id !== exclude).sort(byAcc)[0]?.id || '';
 }
 function usable(id) { const a = byId('accounts', id); return a && !a.deleted && !a.archived ? id : ''; }
 
@@ -714,11 +760,11 @@ function openTxSheet(opts = {}) {
   applyDefaults();
 
   const accChips = (key, value, { exclude, allowNone } = {}) => {
-    const accs = live('accounts').filter((a) => (!a.archived || a.id === value) && a.id !== exclude).sort(byOrder);
+    const accs = live('accounts').filter((a) => (!a.archived || a.id === value) && a.id !== exclude).sort(byAcc);
     const bal = balances();
     return `<div class="chips scroll" data-keep="${key}">
       ${allowNone ? `<button class="chip ${!value ? 'on' : ''}" data-act="f-set" data-k="${key}" data-v="">Без счёта</button>` : ''}
-      ${accs.map((a) => `<button class="chip ${value === a.id ? 'on' : ''}" data-act="f-set" data-k="${key}" data-v="${a.id}">${esc(a.name)}<small class="num">${fmt(bal[a.id], a.currency)}</small></button>`).join('')}
+      ${accs.map((a) => `<button class="chip ${value === a.id ? 'on' : ''}" data-act="f-set" data-k="${key}" data-v="${a.id}">${esc(a.name)}<small class="num ${ui.reveal ? '' : 'masked'}">${fmt(bal[a.id], a.currency)}</small></button>`).join('')}
     </div>`;
   };
 
@@ -741,8 +787,8 @@ function openTxSheet(opts = {}) {
       const cats = live('categories').filter((c) => c.kind === f.type).sort(byOrder);
       dyn = `<div class="field-label">Счёт</div>${accChips('account', f.account)}
         <div class="field-label"><span>Категория</span></div>
-        <div class="cat-grid">${cats.map((c) => `<button class="cat ${f.category === c.id ? 'on' : ''}" data-act="f-set" data-k="category" data-v="${c.id}"><span class="em">${esc(c.emoji)}</span>${esc(c.name)}</button>`).join('')}
-          <button class="cat" data-act="cat-new-inline"><span class="em" style="color:var(--accent)">＋</span>Новая</button></div>`;
+        <div class="cat-grid">${cats.map((c) => `<button class="cat ${f.category === c.id ? 'on' : ''}" data-act="f-set" data-k="category" data-v="${c.id}"><span class="em">${catIcon(c)}</span>${esc(c.name)}</button>`).join('')}
+          <button class="cat" data-act="cat-new-inline"><span class="em" style="color:var(--accent)"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></span>Новая</button></div>`;
     } else if (f.type === 'transfer') {
       const diff = accCur(f.account) !== accCur(f.toAccount);
       dyn = `<div class="field-label">Откуда</div>${accChips('account', f.account)}
@@ -772,8 +818,8 @@ function openTxSheet(opts = {}) {
     }
     const typeCls = f.type === 'expense' ? 'exp' : f.type === 'income' ? 'inc' : '';
     return `
-      <div class="seg">
-        ${[['expense', 'Расход'], ['income', 'Доход'], ['transfer', 'Перевод'], ['debt', 'Долг']].map(([k, l]) => `<button class="${f.type === k ? 'on' : ''}" data-act="f-type" data-v="${k}">${l}</button>`).join('')}
+      <div class="seg types">
+        ${[['expense', 'Расход'], ['income', 'Доход'], ['transfer', 'Между счетами'], ['debt', 'Долг']].map(([k, l]) => `<button class="${f.type === k ? 'on' : ''}" data-act="f-type" data-v="${k}">${l}</button>`).join('')}
       </div>
       <div class="amount-box ${typeCls}"><input id="f-amount" inputmode="decimal" autocomplete="off" placeholder="0" value="${esc(f.amountStr)}"><span class="cur">${CUR[cur].sym}</span></div>
       ${dyn}
@@ -898,37 +944,37 @@ function openAccountSheet(id) {
 
 function openCategorySheet(id, kind = 'expense', onCreated) {
   const orig = id ? byId('categories', id) : null;
-  const c = orig ? { ...orig } : { id: uid('c'), name: '', emoji: '', kind, order: state.categories.length, deleted: false };
+  const c = orig ? { ...orig } : { id: uid('c'), name: '', icon: 'box', emoji: '', kind, order: state.categories.length, deleted: false };
+  if (!c.icon) c.icon = EMOJI_TO_ICON[c.emoji] || 'box';
   const entry = openSheet({
     title: orig ? 'Категория' : 'Новая категория',
     right: 'Готово',
     onRight: () => doSave(),
     refresh: (entry) => {
       entry.body.innerHTML = `
-      <div class="field-label">Эмодзи и название</div>
-      <div style="display:grid;grid-template-columns:72px 1fr;gap:10px">
-        <input class="input" id="c-emoji" placeholder="🙂" value="${esc(c.emoji)}" style="text-align:center;font-size:22px">
-        <input class="input" id="c-name" placeholder="Название" value="${esc(c.name)}">
-      </div>
+      <div class="field-label">Название</div>
+      <input class="input" id="c-name" placeholder="Название" value="${esc(c.name)}">
       <div class="field-label">Тип</div>
       <div class="seg">${[['expense', 'Расход'], ['income', 'Доход']].map(([k, l]) => `<button class="${c.kind === k ? 'on' : ''}" data-act="c-kind" data-v="${k}">${l}</button>`).join('')}</div>
+      <div class="field-label">Значок</div>
+      <div class="icon-grid">${Object.keys(CAT_ICONS).map((k) => `<button class="icon-opt ${c.icon === k ? 'on' : ''}" data-act="c-icon" data-v="${k}" aria-label="${k}">${svgIcon(k)}</button>`).join('')}</div>
       <button class="btn" data-act="c-save">Сохранить</button>
       ${orig ? `<button class="btn danger small" data-act="c-delete">Удалить категорию</button><div class="hint">Старые операции сохранят название категории.</div>` : ''}`;
     },
     onInput: (e) => {
-      if (e.target.id === 'c-emoji') c.emoji = e.target.value;
       if (e.target.id === 'c-name') c.name = e.target.value;
     },
     actions: {
       'c-kind': (el) => { c.kind = el.dataset.v; refreshTopSheet(); },
+      'c-icon': (el) => { c.icon = el.dataset.v; refreshTopSheet(); },
       'c-save': () => doSave(),
       'c-delete': () => { if (confirm('Удалить категорию?')) { softDelete('categories', c.id); closeSheet(); } },
     },
   });
   const doSave = () => {
     c.name = c.name.trim();
-    c.emoji = [...c.emoji.trim()].slice(0, 2).join('') || '📦';
     if (!c.name) return toast('Введи название');
+    c.emoji = '';
     upsert('categories', c);
     closeSheet();
     if (!orig) onCreated?.(c.id);
@@ -942,7 +988,7 @@ function openCategoriesSheet() {
     left: 'Назад',
     refresh: (entry) => {
       const list = (kind) => live('categories').filter((c) => c.kind === kind).sort(byOrder)
-        .map((c) => `<button class="row" data-act="cat-edit" data-id="${c.id}"><div class="ico">${esc(c.emoji)}</div><div class="main"><div class="title">${esc(c.name)}</div></div><span class="chev">›</span></button>`).join('');
+        .map((c) => `<button class="row" data-act="cat-edit" data-id="${c.id}"><div class="ico">${catIcon(c)}</div><div class="main"><div class="title">${esc(c.name)}</div></div><span class="chev">›</span></button>`).join('');
       entry.body.innerHTML = `
         <div class="section-title"><span>Расходы</span><button data-act="cat-add" data-v="expense">+ Добавить</button></div>
         <div class="card">${list('expense')}</div>
@@ -963,7 +1009,7 @@ function openAccountsSheet() {
     refresh: (entry) => {
       const bal = balances();
       const row = (a) => `<button class="row plain" data-act="acc-edit" data-id="${a.id}"><div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${a.currency}${a.initial ? ' · на старте ' + fmt(a.initial, a.currency) : ''}</div></div><div class="amt num">${fmt(bal[a.id], a.currency)}</div><span class="chev">›</span></button>`;
-      const accs = live('accounts').sort(byOrder);
+      const accs = live('accounts').sort(byAcc);
       const active = accs.filter((a) => !a.archived), arch = accs.filter((a) => a.archived);
       entry.body.innerHTML = `
         <div class="section-title"><span>Активные</span><button data-act="acc-add">+ Добавить</button></div>
@@ -979,7 +1025,8 @@ function openAccountsSheet() {
 
 function openDebtSheet(id, onCreated) {
   const orig = id ? byId('debts', id) : null;
-  const d = orig ? { ...orig } : { id: uid('d'), name: '', currency: 'RUB', direction: 'owe', initial: 0, note: '', deleted: false };
+  const d = orig ? { ...orig } : { id: uid('d'), name: '', currency: 'RUB', direction: 'owe', creditor: 'bank', initial: 0, note: '', deleted: false };
+  if (!d.creditor) d.creditor = 'bank';
   let initialStr = d.initial ? String(d.initial) : '';
   const txCount = orig ? state.txs.filter((t) => !t.deleted && t.debt === d.id).length : 0;
 
@@ -991,8 +1038,10 @@ function openDebtSheet(id, onCreated) {
       const payments = orig ? live('txs').filter((t) => t.debt === d.id).sort(sortTx) : [];
       entry.body.innerHTML = `
       <div class="seg">${[['owe', 'Я должен'], ['lent', 'Мне должны']].map(([k, l]) => `<button class="${d.direction === k ? 'on' : ''}" data-act="d-dir" data-v="${k}">${l}</button>`).join('')}</div>
-      <div class="field-label">${d.direction === 'owe' ? 'Кому / что за долг' : 'Кто должен'}</div>
-      <input class="input" id="d-name" placeholder="${d.direction === 'owe' ? 'Кредитка Альфа, займ у Саши…' : 'Имя'}" value="${esc(d.name)}">
+      ${d.direction === 'owe' ? `<div class="field-label">Кому</div>
+      <div class="seg">${[['bank', 'Банку'], ['person', 'Человеку']].map(([k, l]) => `<button class="${d.creditor === k ? 'on' : ''}" data-act="d-cred" data-v="${k}">${l}</button>`).join('')}</div>` : ''}
+      <div class="field-label">Название</div>
+      <input class="input" id="d-name" placeholder="${d.direction === 'lent' ? 'Кто должен' : d.creditor === 'person' ? 'Кому должен' : 'Кредитка, ипотека, рассрочка…'}" value="${esc(d.name)}">
       <div class="field-label">Валюта</div>
       <div class="seg">${['RUB', 'USDT'].map((c) => `<button class="${d.currency === c ? 'on' : ''}" data-act="d-cur" data-v="${c}">${c === 'RUB' ? 'Рубли ₽' : 'USDT'}</button>`).join('')}</div>
       <div class="field-label">Остаток долга на старте учёта</div>
@@ -1012,6 +1061,7 @@ function openDebtSheet(id, onCreated) {
     actions: {
       'd-dir': (el) => { d.direction = el.dataset.v; refreshTopSheet(); },
       'd-cur': (el) => { d.currency = el.dataset.v; refreshTopSheet(); },
+      'd-cred': (el) => { d.creditor = el.dataset.v; refreshTopSheet(); },
       'd-save': () => doSave(),
       'd-delete': () => {
         const msg = txCount ? `Удалить долг? Операции по нему (${txCount}) останутся в истории.` : 'Удалить долг?';
@@ -1183,7 +1233,8 @@ const ACTIONS = {
   'backup-import': () => importBackup(),
   reset: () => resetAll(),
   'hide-tip': () => { state.settings.hideInstallTip = true; save(); render(); },
-  'quiet-day': () => { state.settings.quietDays = [...new Set([...(state.settings.quietDays || []), ymd()])]; save(); render(); toast('Отмечено — серия продолжается 🔥'); },
+  'quiet-day': () => { state.settings.quietDays = [...new Set([...(state.settings.quietDays || []), ymd()])]; save(); render(); toast('Отмечено, серия продолжается'); },
+  reveal: () => { ui.reveal = !ui.reveal; render(); },
 };
 
 document.addEventListener('click', (e) => {
@@ -1210,6 +1261,7 @@ document.addEventListener('keydown', (e) => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
+    ui.reveal = false;
     if (state && state.settings.syncUrl && hasDirty()) syncNow(false);
   } else if (state) {
     render();
@@ -1220,12 +1272,25 @@ window.addEventListener('online', () => state && scheduleSync(500));
 
 /* ---------------- Запуск ---------------- */
 
+// Обновление данных, сохранённых старыми версиями
+function migrate() {
+  let changed = false;
+  for (const c of state.categories) {
+    if (!c.icon) { c.icon = EMOJI_TO_ICON[c.emoji] || 'box'; c.emoji = ''; c._dirty = true; changed = true; }
+  }
+  for (const d of state.debts) {
+    if (d.direction !== 'lent' && !d.creditor) { d.creditor = 'bank'; d._dirty = true; changed = true; }
+  }
+  if (changed) save();
+}
+
 async function init() {
   const saved = await Store.get('state');
   if (saved && Array.isArray(saved.txs)) {
     state = saved;
     for (const k of KINDS) state[k] = state[k] || [];
     state.settings = { ...defaultSettings(), ...(state.settings || {}) };
+    migrate();
   } else {
     state = defaultState();
     save();

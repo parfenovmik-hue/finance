@@ -403,3 +403,37 @@ button { cursor: pointer; border: 0; background: none; padding: 0; }
 }
 .install-tip b { color: var(--text); }
 .install-tip button { margin-left: auto; color: var(--muted); font-size: 18px; line-height: 1; }
+
+/* ---------- v1.1 ---------- */
+
+.hero-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.hero .big { display: block; text-align: left; cursor: pointer; }
+.masked {
+  filter: blur(9px);
+  -webkit-user-select: none; user-select: none;
+  transition: filter .25s ease;
+}
+.hero .big, .hero .sub, .row .amt, .row .meta span { transition: filter .25s ease; }
+.hero-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+
+.seg.types button { flex: 1 1 auto; padding: 7px 8px; font-size: 13.5px; white-space: nowrap; }
+
+.cat .em { display: grid; place-items: center; height: 26px; color: var(--text); }
+.cat.on .em { color: var(--accent); }
+.cat .em svg, .bar-ico svg, .icon-opt svg {
+  width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
+}
+.row .ico { color: var(--text); }
+
+.bar-name { display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+.bar-ico { display: inline-grid; color: var(--muted); }
+.bar-ico svg { width: 18px; height: 18px; stroke-width: 1.9; }
+
+.icon-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.icon-opt {
+  aspect-ratio: 1; border-radius: 12px;
+  display: grid; place-items: center;
+  background: var(--card); box-shadow: var(--shadow);
+  border: 1.5px solid transparent; color: var(--text);
+}
+.icon-opt.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
