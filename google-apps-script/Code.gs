@@ -17,14 +17,14 @@ const SHEETS = {
       ['date', 'Дата'], ['typeName', 'Тип'], ['accountName', 'Счёт'], ['amount', 'Сумма'], ['currency', 'Валюта'],
       ['amountRub', 'Сумма в ₽'], ['categoryName', 'Категория'], ['toAccountName', 'Счёт зачисления'],
       ['toAmount', 'Сумма зачисления'], ['toCurrency', 'Валюта зачисления'], ['debtName', 'Долг'],
-      ['debtActionName', 'Действие по долгу'], ['debtAmount', 'Сумма по долгу'], ['note', 'Комментарий'],
+      ['debtActionName', 'Действие по долгу'], ['debtAmount', 'Сумма по долгу'], ['interest', 'Из них проценты'], ['note', 'Комментарий'],
       ['id', 'id'], ['type', 'type'], ['account', 'account'], ['category', 'category'], ['toAccount', 'toAccount'],
       ['debt', 'debt'], ['debtAction', 'debtAction'], ['createdAt', 'createdAt'], ['updatedAt', 'updatedAt'], ['deleted', 'deleted'],
     ],
   },
   accounts: {
     name: 'Счета',
-    cols: [['name', 'Название'], ['currency', 'Валюта'], ['initial', 'Остаток на старте'], ['archived', 'В архиве'],
+    cols: [['name', 'Название'], ['currency', 'Валюта'], ['initial', 'Остаток на старте'], ['archived', 'В архиве'], ['savings', 'Копилка'], ['credit', 'Кредитка'], ['limit', 'Лимит'], ['rate', 'Ставка %'], ['minPay', 'Мин. платёж'], ['dueDay', 'Платить до'],
       ['id', 'id'], ['order', 'order'], ['updatedAt', 'updatedAt'], ['deleted', 'deleted']],
   },
   categories: {
@@ -34,11 +34,11 @@ const SHEETS = {
   },
   debts: {
     name: 'Долги',
-    cols: [['name', 'Название'], ['direction', 'Направление'], ['creditor', 'Кому'], ['currency', 'Валюта'], ['initial', 'Остаток на старте'], ['note', 'Заметка'],
+    cols: [['name', 'Название'], ['direction', 'Направление'], ['creditor', 'Кому'], ['kind', 'Тип'], ['currency', 'Валюта'], ['initial', 'Остаток на старте'], ['anchorDate', 'Остаток на дату'], ['rate', 'Ставка %'], ['payment', 'Платёж'], ['payDay', 'День платежа'], ['original', 'Сумма кредита'], ['note', 'Заметка'],
       ['id', 'id'], ['updatedAt', 'updatedAt'], ['deleted', 'deleted']],
   },
 };
-const TEXT_KEYS = ['id', 'type', 'account', 'category', 'toAccount', 'debt', 'debtAction', 'note', 'name', 'emoji', 'icon', 'kind', 'direction', 'creditor', 'currency',
+const TEXT_KEYS = ['id', 'type', 'account', 'category', 'toAccount', 'debt', 'debtAction', 'note', 'name', 'emoji', 'icon', 'kind', 'direction', 'creditor', 'anchorDate', 'currency',
   'typeName', 'accountName', 'categoryName', 'toAccountName', 'toCurrency', 'debtName', 'debtActionName'];
 
 function doGet() {

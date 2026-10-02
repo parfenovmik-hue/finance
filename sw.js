@@ -1,7 +1,7 @@
 // Кэш приложения для работы без интернета.
 // Стратегия: сначала сеть (всегда свежая версия), при отсутствии связи — кэш.
 // При изменении файлов увеличь номер версии.
-const CACHE = 'finpanel-v3';
+const CACHE = 'finpanel-v5';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 const NETWORK_TIMEOUT = 3500;
 

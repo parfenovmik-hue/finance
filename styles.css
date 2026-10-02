@@ -437,3 +437,31 @@ button { cursor: pointer; border: 0; background: none; padding: 0; }
   border: 1.5px solid transparent; color: var(--text);
 }
 .icon-opt.on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- v1.2: копилка ---------- */
+
+:root { --sav: #0e9f9a; --sav-soft: rgba(14, 159, 154, 0.13); }
+@media (prefers-color-scheme: dark) { :root { --sav: #2dd4bf; --sav-soft: rgba(45, 212, 191, 0.16); } }
+.row .ico.sav { background: var(--sav-soft); color: var(--sav); }
+.seg.types { overflow-x: auto; scrollbar-width: none; }
+.seg.types::-webkit-scrollbar { display: none; }
+.seg.types button { padding: 7px 4px; font-size: 13px; }
+.save-part { display: flex; gap: 8px; align-items: center; }
+.save-part .input { flex: 1; min-width: 0; }
+.save-part .chip { padding: 10px 12px; }
+
+/* ---------- v1.3: кредиты, иконки-надписи ---------- */
+
+.loan-info { margin-top: 8px; font-size: 13px; color: var(--muted); display: grid; gap: 3px; }
+.loan-info:empty { display: none; }
+.loan-info b { color: var(--text); font-weight: 600; }
+.progress.used i { background: var(--debt); }
+.tag { font-size: 11px; font-weight: 500; color: var(--muted); background: var(--card-2); border-radius: 6px; padding: 2px 6px; vertical-align: 2px; }
+.link-btn { color: var(--accent); font-size: 14px; margin: 10px 4px 0; text-align: left; }
+.cat-preview { display: inline-grid; color: var(--text); }
+.cat-preview svg { width: 26px; height: 26px; }
+.icon-grid { grid-template-columns: repeat(auto-fill, minmax(46px, 1fr)); }
+.debt-card .name { text-align: left; }
+.debt-card .actions button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.debt-card .foot span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debt-card .foot span:last-child { white-space: nowrap; }
