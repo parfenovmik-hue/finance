@@ -6,7 +6,13 @@
    через Apps Script (см. google-apps-script/Code.gs).
    ========================================================= */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '2.0.0';
+
+// Сервер: хранит данные и синхронизирует устройства
+const SERVER = 'https://fin.103-85-112-169.sslip.io';
+const ON_SERVER = location.origin === SERVER;
+// Для проверки на Маке (localhost) API берётся с того же адреса
+const API = (ON_SERVER || ['localhost', '127.0.0.1'].includes(location.hostname) ? '' : SERVER) + '/api';
 
 /* ---------------- Утилиты ---------------- */
 
@@ -225,10 +231,10 @@ const Store = {
 
 const KINDS = ['accounts', 'categories', 'debts', 'txs'];
 let state;
-const ui = { reveal: false, tab: 'home', month: monthOf(ymd()), histAccount: '', sync: { status: 'idle', msg: '' }, sheets: [] };
+const ui = { revealed: new Set(), navStack: [], tab: 'home', month: monthOf(ymd()), histAccount: '', sync: { status: 'idle', msg: '' }, sheets: [] };
 
 function defaultSettings() {
-  return { rate: 0, rateAuto: true, rateAt: 0, syncUrl: '', syncSecret: '', lastSync: 0, last: {}, quietDays: [], hideInstallTip: false };
+  return { rate: 0, rateAuto: true, rateAt: 0, authToken: '', lastSync: 0, movedAt: 0, last: {}, quietDays: [], hideInstallTip: false };
 }
 
 function defaultState() {
@@ -257,12 +263,21 @@ function defaultState() {
 
 function save() { Store.set('state', state); }
 
+// Суммы на главной скрыты; каждая открывается отдельно по своему ключу ('total' или id счёта)
+const shown = (key) => ui.revealed.has(key);
+const maskCls = (key) => (shown(key) ? '' : 'masked');
+
 const live = (k) => state[k].filter((e) => !e.deleted);
 const byId = (k, id) => (id ? state[k].find((e) => e.id === id) : undefined);
 const accCur = (id) => byId('accounts', id)?.currency || 'RUB';
 const isSav = (id) => !!byId('accounts', id)?.savings;
 const isCredit = (id) => !!byId('accounts', id)?.credit;
 const INTEREST_CAT = 'c_interest';
+const CARDPAY_CAT = 'c_cardpay';
+// Кредитка в режиме «платежи — расход»: платёж на неё идёт в расходы,
+// а начисления с неё (проценты, комиссии, покупки) только увеличивают долг
+const payAsExp = (id) => { const a = byId('accounts', id); return !!(a?.credit && a.payAsExpense); };
+const isCardPayExp = (t) => t.type === 'transfer' && payAsExp(t.toAccount) && !isCredit(t.account);
 
 function upsert(k, obj) {
   obj.updatedAt = Math.max(Date.now(), (byId(k, obj.id)?.updatedAt || 0) + 1);
@@ -370,43 +385,80 @@ function nextPayDate(after, day) {
   return c;
 }
 
-// Остаток тела кредита и дата последнего платежа на дату (без операции excludeId)
+// Состояние кредита на дату (без операции excludeId): тело долга, начисленные
+// и ещё не оплаченные проценты, дата последнего платежа.
+// Как в банке: проценты капают каждый день, платёж сначала гасит все накопленные
+// проценты, остаток идёт в тело. Если платёж меньше процентов, недоплата переносится.
 function loanStateAt(d, date, excludeId) {
-  let rest = d.initial || 0, last = d.anchorDate || date;
+  let rest = d.initial || 0, unpaid = 0, last = d.anchorDate || date;
   const list = state.txs
     .filter((t) => !t.deleted && t.type === 'debt' && t.debt === d.id && t.id !== excludeId && t.date <= date)
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.createdAt || 0) - (b.createdAt || 0)));
   for (const t of list) {
-    const amt = debtPrincipal(t);
-    if (t.debtAction === 'pay') { rest -= amt; if (t.date > last) last = t.date; } else rest += amt;
+    if (t.date > last) { unpaid += accrue(rest, d.rate, last, t.date); last = t.date; }
+    if (t.debtAction === 'pay') { unpaid = Math.max(0, round2(unpaid - (t.interest || 0))); rest -= debtPrincipal(t); }
+    else rest += debtPrincipal(t);
+    rest = round2(rest);
   }
-  return { rest: round2(rest), last };
+  return { rest, unpaid: round2(unpaid), last };
 }
+// Сколько процентов нужно погасить платежом в эту дату
 function loanInterest(d, date, excludeId) {
   const st = loanStateAt(d, date, excludeId);
-  return accrue(st.rest, d.rate, st.last, date);
+  return round2(st.unpaid + accrue(st.rest, d.rate, st.last, date));
 }
+const prevPayDate = (s, day) => { const d = parseYmd(s); return payDateIn(d.getFullYear(), d.getMonth() - 1, day); };
 
-// Прогноз: ближайший платёж, сколько платежей осталось и переплата по процентам
+// Прогноз: ближайший платёж, сколько платежей осталось и переплата по процентам.
+// Всё, что внесено с прошлой даты по графику, засчитывается в ближайший платёж
+// (как «Внести сейчас» в банке): если внесено не меньше платежа, ближайшая дата пропускается.
 function loanProjection(d) {
   if (d.kind !== 'loan' || !(d.rate > 0 && d.payment > 0 && d.payDay > 0)) return null;
   const st = loanStateAt(d, '9999-12-31');
   if (st.rest <= 0.004) return null;
   const y = new Date(); y.setDate(y.getDate() - 1);
-  let bal = st.rest, date = st.last;
+  let bal = st.rest, unpaid = st.unpaid, date = st.last;
   let cursor = nextPayDate(date > ymd(y) ? date : ymd(y), d.payDay);
+  const from = prevPayDate(cursor, d.payDay);
+  const paid = state.txs
+    .filter((t) => !t.deleted && t.type === 'debt' && t.debt === d.id && t.debtAction === 'pay' && t.date > from && t.date <= cursor)
+    .reduce((x, t) => x + t.amount, 0);
+  let due = round2(d.payment - paid);
+  if (due < 0.01) { cursor = nextPayDate(cursor, d.payDay); due = d.payment; }
   let n = 0, interest = 0, next = null, end = null;
   while (bal > 0.004 && n < 720) {
-    const i = accrue(bal, d.rate, date, cursor);
-    const pay = Math.min(d.payment, round2(bal + i));
-    const pr = round2(pay - i);
-    if (pr <= 0) return { never: true, next: { date: cursor, interest: i, principal: 0, pay } };
-    if (!next) next = { date: cursor, interest: i, principal: pr, pay };
-    bal = round2(bal - pr); interest += i; n++; end = cursor; date = cursor;
+    const i = round2(unpaid + accrue(bal, d.rate, date, cursor));
+    const pay = Math.min(due, round2(bal + i));
+    const pr = Math.max(0, round2(pay - i));
+    if (pr <= 0 && n > 0) return { never: true, next };
+    if (!next) next = { date: cursor, interest: Math.min(i, pay), principal: pr, pay };
+    unpaid = Math.max(0, round2(i - pay));
+    bal = round2(bal - pr); interest += Math.min(i, pay); n++; end = cursor; date = cursor;
     cursor = nextPayDate(cursor, d.payDay);
+    due = d.payment;
   }
   return { n, interest: round2(interest), next, end };
 }
+// Выписка по кредитке: дата последней выписки и внесены ли по ней проценты.
+// Выписки до заведения кредитки в приложении не учитываются — они уже в стартовом долге.
+function lastStatement(a) {
+  const day = a.statementDay;
+  if (!a.credit || !(day > 0)) return null;
+  const t = new Date();
+  return t.getDate() >= day ? payDateIn(t.getFullYear(), t.getMonth(), day) : payDateIn(t.getFullYear(), t.getMonth() - 1, day);
+}
+function statementPending(a) {
+  const st = lastStatement(a);
+  if (!st || (a.since && st <= a.since)) return null;
+  const done = state.txs.some((t) => !t.deleted && t.type === 'expense' && t.account === a.id && t.category === INTEREST_CAT && t.date >= st);
+  return done ? null : st;
+}
+const statementNotices = () => live('accounts').filter((a) => a.credit && !a.archived && statementPending(a)).map((a) => `
+  <div class="card notice">
+    <div class="notice-text"><b>Выписка по «${esc(a.name)}» от ${shortDate(statementPending(a))}</b>Внеси начисленные проценты и обнови минимальный платёж</div>
+    <button data-act="card-fee" data-id="${a.id}">Внести</button>
+  </div>`).join('');
+
 const shortDate = (s) => { const d = parseYmd(s); return `${d.getDate()} ${MONTHS_GEN[d.getMonth()]}`; };
 const monthYear = (s) => { const d = parseYmd(s); return `${MONTHS_GEN[d.getMonth()]} ${d.getFullYear()}`; };
 
@@ -416,7 +468,7 @@ function monthStats(m) {
     if (t.deleted || monthOf(t.date) !== m) continue;
     r.count++;
     const v = toRub(t.amount, txCur(t));
-    if (t.type === 'expense') { r.exp += v; r.byExp[t.category] = (r.byExp[t.category] || 0) + v; }
+    if (t.type === 'expense') { if (!payAsExp(t.account)) { r.exp += v; r.byExp[t.category] = (r.byExp[t.category] || 0) + v; } }
     else if (t.type === 'income') { r.inc += v; r.byInc[t.category] = (r.byInc[t.category] || 0) + v; }
     else if (t.type === 'transfer') {
       // Копилка: пополнение и изъятие не считаются ни доходом, ни расходом
@@ -424,7 +476,8 @@ function monthStats(m) {
       if (si && !so) { r.toSav += v; r.savByAcc[t.toAccount] = (r.savByAcc[t.toAccount] || 0) + t.toAmount; }
       if (so && !si) { r.fromSav += v; r.savByAcc[t.account] = (r.savByAcc[t.account] || 0) - t.amount; }
       // Перевод на кредитку — погашение, снятие с кредитки — новый долг
-      if (isCredit(t.toAccount) && !isCredit(t.account)) r.debtPaid += v;
+      if (isCardPayExp(t)) { r.exp += v; r.byExp[CARDPAY_CAT] = (r.byExp[CARDPAY_CAT] || 0) + v; }
+      else if (isCredit(t.toAccount) && !isCredit(t.account)) r.debtPaid += v;
       if (isCredit(t.account) && !isCredit(t.toAccount)) r.debtTaken += v;
     }
     else if (t.type === 'debt') {
@@ -478,7 +531,7 @@ async function refreshRate(manual) {
 /* ---------------- Синхронизация с Google Sheets ---------------- */
 
 const FIELDS = {
-  accounts: { s: ['id', 'name', 'currency'], n: ['initial', 'order', 'limit', 'rate', 'minPay', 'dueDay', 'updatedAt'], b: ['archived', 'savings', 'credit', 'deleted'] },
+  accounts: { s: ['id', 'name', 'currency', 'since'], n: ['initial', 'order', 'limit', 'rate', 'minPay', 'dueDay', 'statementDay', 'updatedAt'], b: ['archived', 'savings', 'credit', 'payAsExpense', 'deleted'] },
   categories: { s: ['id', 'name', 'emoji', 'icon', 'kind'], n: ['order', 'updatedAt'], b: ['deleted'] },
   debts: { s: ['id', 'name', 'currency', 'direction', 'creditor', 'kind', 'anchorDate', 'note'], n: ['initial', 'rate', 'payment', 'payDay', 'original', 'updatedAt'], b: ['deleted'] },
   txs: { s: ['id', 'type', 'date', 'account', 'category', 'toAccount', 'debt', 'debtAction', 'note'], n: ['amount', 'toAmount', 'debtAmount', 'interest', 'createdAt', 'updatedAt'], b: ['deleted'] },
@@ -517,7 +570,7 @@ function outRow(k, e) {
 
 let syncBusy = false, syncTimer;
 function scheduleSync(delay = 2500) {
-  if (!state.settings.syncUrl) return;
+  if (!state.settings.authToken) return;
   clearTimeout(syncTimer);
   syncTimer = setTimeout(() => syncNow(false), delay);
 }
@@ -529,27 +582,50 @@ function setSync(status, msg = '') {
 }
 const hasDirty = () => KINDS.some((k) => state[k].some((e) => e._dirty));
 
-async function syncPost(changes) {
-  const s = state.settings;
+async function api(path, body, token) {
   let r;
   try {
-    r = await fetch(s.syncUrl.trim(), {
+    r = await fetch(API + path, {
       method: 'POST',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({ secret: s.syncSecret, changes }),
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify(body || {}),
+      cache: 'no-store',
     });
-  } catch (e) { throw new Error('Нет связи с таблицей'); }
-  let j;
-  try { j = await r.json(); } catch (e) { throw new Error('Скрипт ответил не JSON — проверь адрес и доступ «Все»'); }
-  if (!j.ok) throw new Error(j.error || 'Ошибка скрипта');
-  return j.data || {};
+  } catch (e) { throw new Error('Нет связи с сервером'); }
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* пустой ответ */ }
+  if (r.status === 401) {
+    const err = new Error(j.error || 'Устройство отключено — введи код доступа снова');
+    err.unauthorized = true;
+    throw err;
+  }
+  if (!r.ok || !j.ok) throw new Error(j.error || `Ошибка сервера (${r.status})`);
+  return j;
+}
+async function syncPost(changes) {
+  return (await api('/sync', { changes }, state.settings.authToken)).data || {};
+}
+
+// Подключение устройства по коду доступа
+async function connectDevice(code) {
+  const device = /iPhone|iPad/.test(navigator.userAgent) ? 'iPhone' : /Mac/.test(navigator.userAgent) ? 'Mac' : 'Устройство';
+  const j = await api('/login', { code, device });
+  const s = state.settings;
+  s.authToken = j.token;
+  s.lastSync = 0;
+  // Если на устройстве уже есть записи — отправляем на сервер всё целиком
+  if (state.txs.some((t) => !t.deleted)) for (const k of KINDS) state[k].forEach((e) => (e._dirty = true));
+  save();
+  await syncNow(false);
+  if (ui.sync.status !== 'ok') throw new Error(ui.sync.msg || 'Не удалось синхронизировать');
+  if (!ON_SERVER) { s.movedAt = Date.now(); save(); }
 }
 
 function collectChanges() {
   const changes = {}, sent = [];
   for (const k of KINDS) {
     changes[k] = [];
-    for (const e of state[k]) if (e._dirty) { changes[k].push(outRow(k, e)); sent.push([k, e.id, e.updatedAt]); }
+    for (const e of state[k]) if (e._dirty) { changes[k].push(norm(k, e)); sent.push([k, e.id, e.updatedAt]); }
   }
   return { changes, sent };
 }
@@ -568,7 +644,7 @@ function mergeRemote(data) {
 
 async function syncNow(manual) {
   const s = state.settings;
-  if (!s.syncUrl) { if (manual) toast('Сначала укажи адрес скрипта'); return; }
+  if (!s.authToken) { if (manual) toast('Сначала подключи устройство в настройках'); return; }
   if (syncBusy) return;
   if (!navigator.onLine) { setSync('error', 'Нет интернета'); if (manual) toast('Нет интернета'); return; }
   syncBusy = true;
@@ -577,7 +653,7 @@ async function syncNow(manual) {
   try {
     const fresh = !s.lastSync && !state.txs.some((t) => !t.deleted);
     if (fresh) {
-      // Первое подключение: если в таблице уже есть данные — берём их, иначе заливаем свои
+      // Первое подключение: если на сервере уже есть данные — берём их, иначе заливаем свои
       const data = await syncPost({});
       if (KINDS.some((k) => (data[k] || []).length)) {
         for (const k of KINDS) state[k] = (data[k] || []).map((r) => norm(k, r)).filter((e) => e.id);
@@ -598,8 +674,10 @@ async function syncNow(manual) {
     render();
     if (manual) toast('Синхронизировано ✓');
   } catch (e) {
+    if (e.unauthorized) { s.authToken = ''; save(); }
     setSync('error', e.message);
     if (manual) toast(e.message);
+    render();
   } finally {
     syncBusy = false;
   }
@@ -686,9 +764,11 @@ function txRow(t) {
     const savIn = isSav(t.toAccount) && !isSav(t.account), savOut = isSav(t.account) && !isSav(t.toAccount);
     ico = savIn || savOut ? svgIcon('piggy') : ICON.transfer;
     cls = savIn || savOut ? 'sav' : 'trf';
-    title = savIn ? 'В копилку' : savOut ? 'Из копилки' : tc !== cur ? 'Обмен' : 'Между счетами';
+    const cardIn = isCredit(t.toAccount) && !isCredit(t.account);
+    if (cardIn) { ico = svgIcon('card'); cls = 'dbt'; }
+    title = savIn ? 'В копилку' : savOut ? 'Из копилки' : cardIn ? 'Платёж по кредитке' : tc !== cur ? 'Обмен' : 'Между счетами';
     meta = esc(`${a?.name || '—'} → ${b?.name || '—'}`);
-    amt = fmt(t.amount, cur);
+    amt = isCardPayExp(t) ? fmt(-t.amount, cur, true) : fmt(t.amount, cur);
     if (tc !== cur) sub = '→ ' + fmt(t.toAmount, tc);
   } else {
     const d = byId('debts', t.debt);
@@ -715,6 +795,9 @@ function monthSwitch() {
 
 /* ---------------- Экраны ---------------- */
 
+// Строка, которую можно смахнуть влево, чтобы открыть подробности счёта
+const swipeRow = (id, inner) => `<div class="swipe-row" data-swipe="open-account" data-id="${id}"><div class="swipe-action">Подробнее<svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg></div><div class="swipe-content">${inner}</div></div>`;
+
 function viewHome() {
   const T = totals();
   const s = state.settings;
@@ -726,21 +809,20 @@ function viewHome() {
   const recent = live('txs').sort(sortTx).slice(0, 5);
   const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
   const syncCls = { ok: 'ok', error: 'err', busy: 'wait' }[ui.sync.status] || '';
-  const mask = ui.reveal ? '' : 'masked';
 
   return `
   <div class="topbar">
     <h1>Финансы</h1>
     <div style="display:flex;gap:8px">
-      ${s.syncUrl ? `<button class="icon-btn" data-act="sync-now" aria-label="Синхронизировать"><span style="position:relative;display:grid;place-items:center">${ICON.sync}<i id="sync-dot" class="sync-dot ${syncCls}" style="position:absolute;right:-6px;top:-4px;margin:0"></i></span></button>` : ''}
+      ${s.authToken ? `<button class="icon-btn" data-act="sync-now" aria-label="Синхронизировать"><span style="position:relative;display:grid;place-items:center">${ICON.sync}<i id="sync-dot" class="sync-dot ${syncCls}" style="position:absolute;right:-6px;top:-4px;margin:0"></i></span></button>` : ''}
       <button class="icon-btn" data-act="settings" aria-label="Настройки">${ICON.gear}</button>
     </div>
   </div>
 
   <div class="card hero">
     <div class="hero-head"><span class="label">На всех счетах</span><span class="label">${MONTHS[new Date().getMonth()]}</span></div>
-    <button class="big num ${mask}" data-act="reveal" aria-label="${ui.reveal ? 'Скрыть сумму' : 'Показать сумму'}">${fmtRub(T.total)}</button>
-    ${hasUsdt ? `<div class="sub num ${mask}">${fmt(T.rub, 'RUB')} + ${fmt(T.usdt, 'USDT')}</div>` : ''}
+    <button class="big num ${maskCls('total')}" data-act="reveal" data-key="total" aria-label="${shown('total') ? 'Скрыть сумму' : 'Показать сумму'}">${fmtRub(T.total)}</button>
+    ${hasUsdt ? `<div class="sub num ${maskCls('total')}">${fmt(T.rub, 'RUB')} + ${fmt(T.usdt, 'USDT')}</div>` : ''}
     ${hasUsdt && !s.rate ? `<div class="hint warn">Укажи курс USDT в настройках, чтобы посчитать итог</div>` : ''}
     <div class="hero-grid cols-2">
       <div><div class="k">Доходы</div><div class="v num pos">${fmtRub(st.inc)}</div></div>
@@ -753,25 +835,29 @@ function viewHome() {
     ${!sk.today && new Date().getHours() >= 18 ? `<button class="btn secondary small" data-act="quiet-day">Сегодня трат не было</button>` : ''}
   </div>
 
+  ${!ON_SERVER && s.movedAt ? `<div class="card notice"><div class="notice-text"><b>Приложение переехало</b>Данные уже на сервере. Открой новый адрес и добавь его на экран «Домой».</div><a class="notice-btn" href="${SERVER}/" target="_blank" rel="noopener">Открыть</a></div>` : ''}
+  ${statementNotices()}
+
   ${!standalone && !s.hideInstallTip ? `<div class="card install-tip"><div><b>Установи на экран «Домой»:</b> в Safari нажми «Поделиться» → «На экран Домой». Так приложение откроется на весь экран и будет работать без интернета.</div><button data-act="hide-tip" aria-label="Скрыть">×</button></div>` : ''}
 
   <div class="section-title"><span>Счета</span><button data-act="accounts">Изменить</button></div>
   <div class="card">
-    ${accs.map((a) => `<button class="row plain" data-act="open-account" data-id="${a.id}">
-      <div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${a.currency === 'USDT' && s.rate ? `<span class="${mask}">≈ ${fmtRub(toRub(T.bal[a.id], 'USDT'))}</span>` : a.currency}</div></div>
-      <div class="amt num ${mask} ${T.bal[a.id] < 0 ? 'neg' : ''}">${fmt(T.bal[a.id], a.currency)}</div><span class="chev">›</span>
-    </button>`).join('') || `<div class="empty">Нет счетов</div>`}
+    ${accs.map((a) => swipeRow(a.id, `<button class="row plain" data-act="reveal" data-key="${a.id}">
+      <div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${a.currency === 'USDT' && s.rate ? `<span class="${maskCls(a.id)}">≈ ${fmtRub(toRub(T.bal[a.id], 'USDT'))}</span>` : a.currency}</div></div>
+      <div class="amt num ${maskCls(a.id)} ${T.bal[a.id] < 0 ? 'neg' : ''}">${fmt(T.bal[a.id], a.currency)}</div>
+    </button>`)).join('') || `<div class="empty">Нет счетов</div>`}
   </div>
+  ${accs.length && !s.swipeHintSeen ? `<div class="hint swipe-hint">Нажми на счёт, чтобы увидеть сумму. Смахни влево — подробнее.</div>` : ''}
 
   ${savs.length ? `<div class="section-title"><span>Копилка</span><button data-act="sav-tx" data-dir="in">Пополнить</button></div>
   <div class="card">
     ${savs.map((a) => {
       const m = st.savByAcc[a.id] || 0;
-      return `<button class="row" data-act="open-account" data-id="${a.id}">
+      return swipeRow(a.id, `<button class="row" data-act="reveal" data-key="${a.id}">
       <div class="ico sav">${svgIcon('piggy')}</div>
-      <div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${m ? `<span class="${mask}">${fmt(m, a.currency, true)}</span> в этом месяце` : 'в этом месяце без пополнений'}</div></div>
-      <div class="amt num ${mask}">${fmt(T.bal[a.id], a.currency)}</div><span class="chev">›</span>
-    </button>`;
+      <div class="main"><div class="title">${esc(a.name)}</div><div class="meta">${m ? `<span class="${maskCls(a.id)}">${fmt(m, a.currency, true)}</span> в этом месяце` : 'в этом месяце без пополнений'}</div></div>
+      <div class="amt num ${maskCls(a.id)}">${fmt(T.bal[a.id], a.currency)}</div>
+    </button>`);
     }).join('')}
   </div>` : ''}
 
@@ -800,7 +886,7 @@ function viewHistory() {
     ${accs.map((a) => `<button class="chip ${ui.histAccount === a.id ? 'on' : ''}" data-act="hist-acc" data-id="${a.id}">${esc(a.name)}</button>`).join('')}
   </div>
   ${groups.map((g) => {
-    const spent = g.items.filter((t) => t.type === 'expense').reduce((s, t) => s + toRub(t.amount, txCur(t)), 0);
+    const spent = g.items.filter((t) => (t.type === 'expense' && !payAsExp(t.account)) || isCardPayExp(t)).reduce((s, t) => s + toRub(t.amount, txCur(t)), 0);
     return `<div class="day-head"><span>${dayLabel(g.date)}</span><span class="num">${spent ? '−' + fmtRub(spent) : ''}</span></div>
       <div class="card">${g.items.map(txRow).join('')}</div>`;
   }).join('') || `<div class="card" style="margin-top:14px"><div class="empty">В этом месяце операций нет</div></div>`}`;
@@ -822,7 +908,7 @@ function viewDebts() {
   const loanInfo = (d) => {
     const pr = loanProjection(d);
     const lines = [`Ставка ${fmtRate(d.rate)}% · платёж ${fmt(d.payment, d.currency)} ${d.payDay}-го числа`];
-    if (pr?.next) lines.push(`Ближайший ${shortDate(pr.next.date)}: <b>${fmt(pr.next.interest, d.currency)}</b> проценты, <b>${fmt(pr.next.principal, d.currency)}</b> в долг`);
+    if (pr?.next) lines.push(`Ближайший ${shortDate(pr.next.date)}: ${fmt(pr.next.pay, d.currency)}, из них <b>${fmt(pr.next.interest, d.currency)}</b> проценты, <b>${fmt(pr.next.principal, d.currency)}</b> в долг`);
     if (pr?.never) lines.push('<span class="neg">Платёж меньше процентов — долг не уменьшается</span>');
     else if (pr) lines.push(`Осталось ≈${pr.n} ${plural(pr.n, ['платёж', 'платежа', 'платежей'])}, до ${monthYear(pr.end)} · переплата ≈${fmt(Math.round(pr.interest), d.currency)}`);
     return `<div class="loan-info">${lines.map((l) => `<div>${l}</div>`).join('')}</div>`;
@@ -862,6 +948,8 @@ function viewDebts() {
       <div class="loan-info">
         ${a.minPay ? `<div>Минимальный платёж <b>${fmt(a.minPay, a.currency)}</b>${a.dueDay ? ` до ${a.dueDay}-го числа` : ''}</div>` : ''}
         ${perMonth ? `<div>При таком долге проценты ≈${fmt(Math.round(perMonth), a.currency)} в месяц (ставка ${fmtRate(a.rate)}%)</div>` : ''}
+        ${a.payAsExpense ? '<div>Платежи идут в расходы, проценты только увеличивают долг</div>' : ''}
+        ${statementPending(a) ? `<div class="neg">Не внесены проценты по выписке от ${shortDate(statementPending(a))}</div>` : ''}
       </div>
       <div class="actions">
         <button data-act="card-pay" data-id="${a.id}">Внести платёж</button>
@@ -990,7 +1078,7 @@ function openTxSheet(opts = {}) {
     const bal = balances();
     return `<div class="chips scroll" data-keep="${key}">
       ${allowNone ? `<button class="chip ${!value ? 'on' : ''}" data-act="f-set" data-k="${key}" data-v="">Без счёта</button>` : ''}
-      ${accs.map((a) => `<button class="chip ${value === a.id ? 'on' : ''}" data-act="f-set" data-k="${key}" data-v="${a.id}">${esc(a.name)}<small class="num ${ui.reveal ? '' : 'masked'}">${fmt(bal[a.id], a.currency)}</small></button>`).join('')}
+      ${accs.map((a) => `<button class="chip ${value === a.id ? 'on' : ''}" data-act="f-set" data-k="${key}" data-v="${a.id}">${esc(a.name)}<small class="num ${maskCls(a.id)}">${fmt(bal[a.id], a.currency)}</small></button>`).join('')}
     </div>`;
   };
 
@@ -1042,7 +1130,8 @@ function openTxSheet(opts = {}) {
     const amount = parseNum(f.amountStr), interest = parseNum(f.interestStr);
     const st = loanStateAt(d, f.date || ymd(), editing?.id);
     const principal = Math.max(0, round2(amount - interest));
-    return `Проценты с ${shortDate(st.last)} по ставке ${fmtRate(d.rate)}%. В счёт долга: ${fmt(principal, d.currency)} · остаток станет ${fmt(Math.max(0, st.rest - principal), d.currency)}`;
+    const days = Math.round((parseYmd(f.date || ymd()) - parseYmd(st.last)) / 864e5);
+    return `Проценты с ${shortDate(st.last)} (${days} ${plural(days, ['день', 'дня', 'дней'])})${st.unpaid ? ` + недоплата ${fmt(st.unpaid, d.currency)}` : ''}, ставка ${fmtRate(d.rate)}%. В счёт долга: ${fmt(principal, d.currency)} · остаток станет ${fmt(Math.max(0, st.rest - principal), d.currency)}`;
   };
 
   const body = () => {
@@ -1075,7 +1164,7 @@ function openTxSheet(opts = {}) {
           </div>
           <div class="field-label">${f.savDir === 'in' ? 'С какого счёта' : 'На какой счёт'}</div>${accChips('account', f.account, { kind: 'regular' })}
           ${savs.length > 1 ? `<div class="field-label">Копилка</div>${accChips('savAccount', f.savAccount, { kind: 'savings' })}`
-            : sv ? `<div class="hint">В копилке «${esc(sv.name)}»: <span class="num ${ui.reveal ? '' : 'masked'}">${fmt(balances()[sv.id], sv.currency)}</span></div>` : ''}
+            : sv ? `<div class="hint">В копилке «${esc(sv.name)}»: <span class="num ${maskCls(sv.id)}">${fmt(balances()[sv.id], sv.currency)}</span></div>` : ''}
           ${toAmountBlock()}`;
       }
     } else if (f.type === 'transfer') {
@@ -1228,7 +1317,7 @@ function openAccountSheet(id, preset = {}, onCreated) {
   const hasTx = !!orig && state.txs.some((t) => !t.deleted && (t.account === a.id || t.toAccount === a.id));
   const str = (v) => (v ? String(v) : '');
   // У кредитки вводим долг (положительное число), а храним отрицательный остаток
-  const inp = { initial: str(a.credit ? -a.initial : a.initial), limit: str(a.limit), rate: str(a.rate), minPay: str(a.minPay), dueDay: str(a.dueDay) };
+  const inp = { initial: str(a.credit ? -a.initial : a.initial), limit: str(a.limit), rate: str(a.rate), minPay: str(a.minPay), dueDay: str(a.dueDay), statementDay: str(a.statementDay || (orig ? 0 : 20)) };
   const kind = () => (a.credit ? 'credit' : a.savings ? 'savings' : 'regular');
   const titles = { regular: ['Счёт', 'Новый счёт'], savings: ['Копилка', 'Новая копилка'], credit: ['Кредитка', 'Новая кредитка'] };
 
@@ -1256,8 +1345,16 @@ function openAccountSheet(id, preset = {}, onCreated) {
           <div><div class="field-label">Мин. платёж</div><input class="input num" id="a-minpay" inputmode="decimal" placeholder="0" value="${esc(inp.minPay)}"></div>
           <div><div class="field-label">Платить до (число)</div><input class="input num" id="a-dueday" inputmode="numeric" placeholder="14" value="${esc(inp.dueDay)}"></div>
         </div>
-        <div class="field-label">Ставка, % годовых (необязательно)</div>
-        <input class="input num" id="a-rate" inputmode="decimal" placeholder="для примерного расчёта процентов" value="${esc(inp.rate)}">` : `
+        <div class="two">
+          <div><div class="field-label">День выписки</div><input class="input num" id="a-stday" inputmode="numeric" placeholder="20" value="${esc(inp.statementDay)}"></div>
+          <div><div class="field-label">Ставка, %</div><input class="input num" id="a-rate" inputmode="decimal" placeholder="28,27" value="${esc(inp.rate)}"></div>
+        </div>
+        <div class="hint">С дня выписки на главной появится напоминание внести проценты — пока не внесёшь.</div>
+        <div class="field-label">Как считать платежи по кредитке</div>
+        <div class="seg">${[[false, 'Погашение долга'], [true, 'Расход']].map(([v, l]) => `<button class="${!!a.payAsExpense === v ? 'on' : ''}" data-act="a-payexp" data-v="${v ? 1 : 0}">${l}</button>`).join('')}</div>
+        <div class="hint">${a.payAsExpense
+          ? 'Каждый платёж на кредитку — расход в отчёте. Проценты и комиссии только увеличивают долг и в расходы не попадают, иначе посчитаются дважды. Подходит, если кредиткой больше не пользуешься, а только гасишь.'
+          : 'Расходами считаются покупки с кредитки и проценты. Платёж на кредитку — погашение долга, в расходы не попадает.'}</div>` : `
         <div class="field-label">Остаток на старте учёта</div>
         <input class="input num" id="a-initial" inputmode="decimal" placeholder="0" value="${esc(inp.initial)}">
         <div class="hint">Сколько денег было ${k === 'savings' ? 'в копилке' : 'на счёте'}, когда начал вести учёт. Дальше баланс считается сам.</div>`}
@@ -1266,11 +1363,12 @@ function openAccountSheet(id, preset = {}, onCreated) {
       ${orig && !hasTx ? `<button class="btn danger small" data-act="a-delete">Удалить</button>` : ''}`;
     },
     onInput: (e) => {
-      const map = { 'a-initial': 'initial', 'a-limit': 'limit', 'a-rate': 'rate', 'a-minpay': 'minPay', 'a-dueday': 'dueDay' };
+      const map = { 'a-initial': 'initial', 'a-limit': 'limit', 'a-rate': 'rate', 'a-minpay': 'minPay', 'a-dueday': 'dueDay', 'a-stday': 'statementDay' };
       if (e.target.id === 'a-name') a.name = e.target.value;
       if (map[e.target.id]) inp[map[e.target.id]] = e.target.value;
     },
     actions: {
+      'a-payexp': (el) => { a.payAsExpense = el.dataset.v === '1'; refreshTopSheet(); },
       'a-kind': (el) => { a.savings = el.dataset.v === 'savings'; a.credit = el.dataset.v === 'credit'; if (a.credit) a.currency = 'RUB'; refreshTopSheet(); },
       'a-cur': (el) => { a.currency = el.dataset.v; refreshTopSheet(); },
       'a-save': () => doSave(),
@@ -1288,6 +1386,8 @@ function openAccountSheet(id, preset = {}, onCreated) {
       a.rate = round2(parseNum(inp.rate));
       a.minPay = round2(parseNum(inp.minPay));
       a.dueDay = Math.min(31, Math.max(0, Math.round(parseNum(inp.dueDay))));
+      a.statementDay = Math.min(31, Math.max(0, Math.round(parseNum(inp.statementDay))));
+      if (!a.since) a.since = ymd();
     }
     upsert('accounts', a);
     closeSheet();
@@ -1505,15 +1605,26 @@ function openSettings() {
         <div class="hint">${s.rateAuto && s.rateAt ? 'Рыночный курс (CoinGecko), обновлён ' + new Date(s.rateAt).toLocaleString('ru-RU', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'Задан вручную'}. Нужен только для пересчёта итогов — реальный курс обмена записывается в каждой операции.</div>
       </div>
 
-      <div class="section-title"><span>Google Таблица</span></div>
+      <div class="section-title"><span>${ON_SERVER ? 'Синхронизация' : 'Переезд на сервер'}</span></div>
       <div class="card pad">
-        <div class="field-label" style="margin-top:0">Адрес веб-приложения Apps Script</div>
-        <input class="input" id="s-url" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(s.syncUrl)}" autocapitalize="off" autocorrect="off" spellcheck="false">
-        <div class="field-label">Секретный ключ</div>
-        <input class="input" id="s-secret" placeholder="Тот же, что в скрипте" value="${esc(s.syncSecret)}" autocapitalize="off" autocorrect="off" spellcheck="false">
-        <div class="hint">${syncState ? `<span class="sync-dot ${syncState[0]}"></span>${esc(syncState[1])} · ` : ''}последняя синхронизация: ${last}</div>
-        <button class="btn small" data-act="sync-now">Синхронизировать сейчас</button>
+        ${s.authToken ? `
+          <div class="hint" style="margin-top:0">${syncState ? `<span class="sync-dot ${syncState[0]}"></span>${esc(syncState[1])} · ` : ''}последняя синхронизация: ${last}</div>
+          <button class="btn small" data-act="sync-now">Синхронизировать сейчас</button>
+          ${!ON_SERVER && s.movedAt ? `<a class="btn small" href="${SERVER}/" target="_blank" rel="noopener" style="text-align:center;text-decoration:none">Открыть новый адрес</a>` : ''}
+          <button class="btn danger small" data-act="auth-logout">Отключить это устройство</button>`
+        : `
+          <div class="hint" style="margin-top:0">${ON_SERVER
+            ? 'Введи код доступа, чтобы данные синхронизировались между iPhone и Маком и хранились на сервере.'
+            : 'Приложение переезжает на твой сервер. Введи код доступа: данные с этого телефона отправятся на сервер, потом откроешь новый адрес — там всё будет.'}</div>
+          <input class="input" id="s-code" placeholder="Код доступа" autocapitalize="characters" autocorrect="off" autocomplete="off" spellcheck="false" style="margin-top:10px">
+          <button class="btn small" data-act="auth-login">${ON_SERVER ? 'Подключить' : 'Перенести данные на сервер'}</button>`}
       </div>
+
+      <div class="section-title"><span>Напоминания</span></div>
+      <div class="card">
+        <a class="row plain list-btn" href="reminder-statement.ics" target="_blank" rel="noopener">Добавить в Календарь: «Внести данные по выписке» — 20-го в 20:00</a>
+      </div>
+      <div class="hint">Откроется Safari и предложит добавить повторяющееся событие. Уведомление придёт на заблокированный экран каждый месяц. Время и день можно поменять в Календаре.</div>
 
       <div class="section-title"><span>Данные</span></div>
       <div class="card">
@@ -1522,18 +1633,36 @@ function openSettings() {
         <button class="row plain list-btn" data-act="backup-import">Восстановить из копии</button>
         <button class="row plain list-btn danger" data-act="reset">Стереть данные на этом устройстве</button>
       </div>
-      <div class="hint" style="text-align:center;margin:18px 0 0">Финансы ${APP_VERSION} · данные хранятся на телефоне${s.syncUrl ? ' и в твоей Google-таблице' : ''}</div>`;
+      <div class="hint" style="text-align:center;margin:18px 0 0">Финансы ${APP_VERSION} · данные хранятся на устройстве${s.authToken ? ' и на твоём сервере' : ''}</div>`;
     },
     onInput: (e) => {
       if (e.type !== 'change') return;
       const s = state.settings;
       if (e.target.id === 's-rate') { s.rate = round2(parseNum(e.target.value)); s.rateAuto = false; s.rateAt = Date.now(); save(); refreshTopSheet(); }
-      if (e.target.id === 's-url') { s.syncUrl = e.target.value.trim(); save(); }
-      if (e.target.id === 's-secret') { s.syncSecret = e.target.value.trim(); save(); }
+
     },
     actions: {
       categories: () => openCategoriesSheet(),
       'rate-refresh': () => refreshRate(true),
+      'auth-login': async () => {
+        const code = ($('#s-code', entry.sh)?.value || '').trim();
+        if (!code) return toast('Введи код доступа');
+        toast('Подключаю…');
+        try {
+          await connectDevice(code);
+          toast(ON_SERVER ? 'Устройство подключено ✓' : 'Данные на сервере ✓ Теперь открой новый адрес');
+        } catch (e) { toast(e.message); }
+        refreshTopSheet();
+        render();
+      },
+      'auth-logout': async () => {
+        if (!confirm('Отключить это устройство от сервера? Данные на сервере останутся.')) return;
+        try { await api('/logout', {}, state.settings.authToken); } catch (e) { /* всё равно отключаем */ }
+        state.settings.authToken = '';
+        save();
+        refreshTopSheet();
+        render();
+      },
     },
   });
 }
@@ -1572,7 +1701,7 @@ function exportCSV() {
 function exportBackup() {
   const data = { app: 'finpanel', version: APP_VERSION, exportedAt: new Date().toISOString() };
   for (const k of KINDS) data[k] = state[k];
-  data.settings = { ...state.settings, syncSecret: '' };
+  data.settings = { ...state.settings, authToken: '' };
   shareFile(JSON.stringify(data, null, 1), `finance-backup-${ymd()}.json`, 'application/json');
 }
 
@@ -1585,7 +1714,7 @@ function importBackup() {
       const data = JSON.parse(await inp.files[0].text());
       if (!KINDS.every((k) => Array.isArray(data[k]))) throw new Error();
       if (!confirm('Заменить текущие данные на устройстве данными из копии?')) return;
-      const keepSync = { syncUrl: state.settings.syncUrl, syncSecret: state.settings.syncSecret };
+      const keepSync = { authToken: state.settings.authToken };
       for (const k of KINDS) state[k] = data[k].map((e) => ({ ...e, _dirty: true }));
       state.settings = { ...defaultSettings(), ...(data.settings || {}), ...keepSync, lastSync: 1 };
       save();
@@ -1602,7 +1731,7 @@ function importBackup() {
 
 function resetAll() {
   if (!confirm('Стереть все данные на этом устройстве? Таблица Google не изменится — при следующей синхронизации данные загрузятся из неё.')) return;
-  const keep = { syncUrl: state.settings.syncUrl, syncSecret: state.settings.syncSecret };
+  const keep = { authToken: state.settings.authToken };
   state = defaultState();
   Object.assign(state.settings, keep);
   save();
@@ -1616,11 +1745,11 @@ function resetAll() {
 const ACTIONS = {
   'sheet-close': () => closeSheet(),
   'sheet-right': () => ui.sheets[ui.sheets.length - 1]?.onRight?.(),
-  tab: (el) => { ui.tab = el.dataset.tab; render(); window.scrollTo(0, 0); },
+  tab: (el) => goTo({ tab: el.dataset.tab }),
   'm-prev': () => { ui.month = shiftMonth(ui.month, -1); render(); },
   'm-next': () => { ui.month = shiftMonth(ui.month, 1); render(); },
   'hist-acc': (el) => { ui.histAccount = el.dataset.id; render(); },
-  'open-account': (el) => { ui.histAccount = el.dataset.id; ui.month = monthOf(ymd()); ui.tab = 'history'; render(); window.scrollTo(0, 0); },
+  'open-account': (el) => goTo({ tab: 'history', histAccount: el.dataset.id, month: monthOf(ymd()) }),
   'edit-tx': (el) => openTxSheet({ id: el.dataset.id }),
   'debt-tx': (el) => {
     const d = byId('debts', el.dataset.id);
@@ -1641,12 +1770,118 @@ const ACTIONS = {
   reset: () => resetAll(),
   'hide-tip': () => { state.settings.hideInstallTip = true; save(); render(); },
   'quiet-day': () => { state.settings.quietDays = [...new Set([...(state.settings.quietDays || []), ymd()])]; save(); render(); toast('Отмечено, серия продолжается'); },
-  reveal: () => { ui.reveal = !ui.reveal; render(); },
+  reveal: (el) => { const k = el.dataset.key; ui.revealed.has(k) ? ui.revealed.delete(k) : ui.revealed.add(k); render(); },
 };
+
+// Переход между экранами с запоминанием, куда возвращаться
+function goTo({ tab, histAccount, month }) {
+  const same = tab === ui.tab && (histAccount === undefined || histAccount === ui.histAccount);
+  if (!same) {
+    ui.navStack.push({ tab: ui.tab, histAccount: ui.histAccount, month: ui.month, scroll: window.scrollY });
+    if (ui.navStack.length > 30) ui.navStack.shift();
+  }
+  ui.tab = tab;
+  if (histAccount !== undefined) ui.histAccount = histAccount;
+  if (month) ui.month = month;
+  render();
+  window.scrollTo(0, 0);
+}
+function goBack() {
+  const prev = ui.navStack.pop();
+  if (!prev) return false;
+  Object.assign(ui, { tab: prev.tab, histAccount: prev.histAccount, month: prev.month });
+  render();
+  window.scrollTo(0, prev.scroll || 0);
+  return true;
+}
+
+/* ---------------- Жесты: свайп строки влево и свайп от края назад ---------------- */
+
+const EDGE = 28;
+let gest = null, suppressClickUntil = 0;
+
+document.addEventListener('touchstart', (e) => {
+  if (e.touches.length !== 1) { gest = null; return; }
+  const t = e.touches[0];
+  gest = { x0: t.clientX, y0: t.clientY, dx: 0, mode: null, edge: t.clientX <= EDGE, row: e.target.closest('.swipe-row') };
+}, { passive: true });
+
+document.addEventListener('touchmove', (e) => {
+  if (!gest) return;
+  const t = e.touches[0];
+  const dx = t.clientX - gest.x0, dy = t.clientY - gest.y0;
+  if (!gest.mode) {
+    if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+    if (Math.abs(dx) > Math.abs(dy) * 1.3) {
+      if (gest.edge && dx > 0 && (ui.sheets.length || ui.navStack.length)) gest.mode = 'back';
+      else if (gest.row && dx < 0 && !ui.sheets.length) gest.mode = 'row';
+      else gest.mode = 'none';
+    } else gest.mode = 'none';
+    if (gest.mode === 'back') {
+      gest.target = ui.sheets.length ? ui.sheets[ui.sheets.length - 1].sh : $('#view');
+      gest.target.style.transition = 'none';
+    }
+    if (gest.mode === 'row') {
+      gest.content = gest.row.querySelector('.swipe-content');
+      gest.content.style.transition = 'none';
+      gest.row.classList.add('swiping');
+    }
+  }
+  if (gest.mode === 'none') return;
+  e.preventDefault();
+  gest.dx = dx;
+  if (gest.mode === 'back') gest.target.style.transform = `translateX(${Math.max(0, dx)}px)`;
+  if (gest.mode === 'row') {
+    const w = gest.row.offsetWidth;
+    const x = Math.max(dx, -w);
+    gest.content.style.transform = `translateX(${x}px)`;
+    gest.row.classList.toggle('armed', -x > Math.min(110, w * 0.3));
+  }
+}, { passive: false });
+
+document.addEventListener('touchend', () => {
+  const g = gest;
+  gest = null;
+  if (!g || !g.mode || g.mode === 'none') return;
+  suppressClickUntil = Date.now() + 400;
+  if (g.mode === 'back') {
+    const el = g.target;
+    el.style.transition = 'transform .22s ease';
+    if (g.dx > 90) {
+      el.style.transform = 'translateX(100%)';
+      setTimeout(() => {
+        if (ui.sheets.length && el === ui.sheets[ui.sheets.length - 1].sh) closeSheet();
+        else { goBack(); el.style.transition = 'none'; el.style.transform = ''; }
+      }, 200);
+    } else el.style.transform = '';
+  }
+  if (g.mode === 'row') {
+    const c = g.content, row = g.row;
+    c.style.transition = 'transform .22s ease';
+    if (row.classList.contains('armed')) {
+      c.style.transform = 'translateX(-100%)';
+      if (!state.settings.swipeHintSeen) { state.settings.swipeHintSeen = true; save(); }
+      setTimeout(() => goTo({ tab: 'history', histAccount: row.dataset.id, month: monthOf(ymd()) }), 180);
+    } else {
+      c.style.transform = '';
+      setTimeout(() => row.classList.remove('swiping', 'armed'), 220);
+    }
+  }
+});
+document.addEventListener('touchcancel', () => {
+  if (gest?.target) gest.target.style.transform = '';
+  if (gest?.content) gest.content.style.transform = '';
+  gest = null;
+});
+
+// После жеста отпускание пальца не должно считаться нажатием
+document.addEventListener('click', (e) => {
+  if (Date.now() < suppressClickUntil) { e.stopPropagation(); e.preventDefault(); }
+}, true);
 
 document.addEventListener('click', (e) => {
   const tabBtn = e.target.closest('.tab');
-  if (tabBtn) { ui.tab = tabBtn.dataset.tab; if (tabBtn.dataset.tab !== 'history') ui.histAccount = ''; render(); window.scrollTo(0, 0); return; }
+  if (tabBtn) { goTo({ tab: tabBtn.dataset.tab, histAccount: '' }); return; }
   if (e.target.closest('#fab')) { openTxSheet(); return; }
   const el = e.target.closest('[data-act]');
   if (!el) return;
@@ -1668,11 +1903,11 @@ document.addEventListener('keydown', (e) => {
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden') {
-    ui.reveal = false;
-    if (state && state.settings.syncUrl && hasDirty()) syncNow(false);
+    ui.revealed.clear();
+    if (state && state.settings.authToken && hasDirty()) syncNow(false);
   } else if (state) {
     render();
-    if (state.settings.syncUrl) scheduleSync(800);
+    if (state.settings.authToken) scheduleSync(800);
   }
 });
 window.addEventListener('online', () => state && scheduleSync(500));
@@ -1690,15 +1925,26 @@ function migrate() {
   }
   // v1.3: категория процентов и категории доходов по проектам (один раз)
   const s = state.settings;
-  if ((s.mig || 0) < 13) {
+  if ((s.mig || 0) < 14) {
     const now = Date.now();
     const addCat = (o) => { state.categories.push({ order: state.categories.length, emoji: '', updatedAt: now, deleted: false, _dirty: true, ...o }); };
     if (!byId('categories', INTEREST_CAT)) addCat({ id: INTEREST_CAT, name: 'Проценты по кредитам', icon: 'percent', kind: 'expense' });
+    if (!byId('categories', CARDPAY_CAT)) addCat({ id: CARDPAY_CAT, name: 'Погашение кредитки', icon: 'card', kind: 'expense' });
     const hasInc = (n) => state.categories.some((c) => !c.deleted && c.kind === 'income' && c.name.toLowerCase() === n.toLowerCase());
-    [['MOST', 'txt:MOST'], ['Страховки', 'umbrella'], ['Расчёты за прошлый месяц', 'history']].forEach(([n, ic]) => {
-      if (!hasInc(n)) addCat({ id: uid('c'), name: n, icon: ic, kind: 'income' });
-    });
-    s.mig = 13;
+    if ((s.mig || 0) < 13) {
+      [['MOST', 'txt:MOST'], ['Страховки', 'umbrella'], ['Расчёты за прошлый месяц', 'history']].forEach(([n, ic]) => {
+        if (!hasInc(n)) addCat({ id: uid('c'), name: n, icon: ic, kind: 'income' });
+      });
+    }
+    s.mig = 14;
+    changed = true;
+  }
+  // v1.6: кредиткам из прошлых версий — день выписки и дата начала учёта
+  if ((s.mig || 0) < 16) {
+    for (const a of state.accounts) {
+      if (a.credit && !a.since) { a.since = ymd(); if (!a.statementDay) a.statementDay = 20; a._dirty = true; }
+    }
+    s.mig = 16;
     changed = true;
   }
   if (!state.accounts.some((a) => a.savings && !a.deleted)) {
@@ -1724,7 +1970,11 @@ async function init() {
   try { navigator.storage?.persist?.(); } catch (e) {}
   const s = state.settings;
   if (s.rateAuto && Date.now() - (s.rateAt || 0) > 6 * 3600e3) refreshRate(false);
-  if (s.syncUrl) scheduleSync(600);
+  if (s.authToken) scheduleSync(600);
+  // Пока приложение открыто, подтягиваем изменения с других устройств раз в минуту
+  setInterval(() => {
+    if (document.visibilityState === 'visible' && state.settings.authToken && !ui.sheets.length && !gest) syncNow(false);
+  }, 60000);
 }
 
 // Обновления: проверяем при каждом возврате в приложение; новая версия

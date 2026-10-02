@@ -1,0 +1,21 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Finance PWA//RU
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:finance-statement-reminder-20@parfenovmik-hue.github.io
+DTSTAMP:20261003T000000Z
+DTSTART:20261020T200000
+DURATION:PT10M
+RRULE:FREQ=MONTHLY;BYMONTHDAY=20
+SUMMARY:Внести данные по выписке из банка
+DESCRIPTION:Финансы → Долги → Кредитка → «Проценты»: начисленные проценты из выписки. Затем обнови минимальный платёж.
+URL:https://parfenovmik-hue.github.io/finance/
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Внести данные по выписке из банка
+TRIGGER:PT0S
+END:VALARM
+END:VEVENT
+END:VCALENDAR

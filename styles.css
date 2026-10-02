@@ -465,3 +465,35 @@ button { cursor: pointer; border: 0; background: none; padding: 0; }
 .debt-card .actions button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .debt-card .foot span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .debt-card .foot span:last-child { white-space: nowrap; }
+
+/* ---------- v1.4: свайпы ---------- */
+
+.swipe-row { position: relative; overflow: hidden; }
+.swipe-action {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+  padding-right: 18px;
+  background: var(--card-2); color: var(--muted);
+  font-size: 15px; font-weight: 600;
+  opacity: 0; transition: background .15s ease, color .15s ease;
+}
+.swipe-action svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.swipe-row.swiping .swipe-action { opacity: 1; }
+.swipe-row.armed .swipe-action { background: var(--accent); color: #fff; }
+.swipe-content { position: relative; background: var(--card); will-change: transform; }
+.swipe-content > .row { width: 100%; }
+.swipe-row + .swipe-row > .swipe-content > .row::before {
+  content: ""; position: absolute; top: 0; right: 0; left: 64px;
+  border-top: 1px solid var(--line);
+}
+.swipe-row + .swipe-row > .swipe-content > .row.plain::before { left: 16px; }
+.swipe-hint { margin: 8px 4px 0; }
+
+/* ---------- v1.6: напоминания ---------- */
+
+.notice { margin-top: 14px; padding: 12px 14px; display: flex; align-items: center; gap: 12px; border: 1.5px solid var(--debt-soft); }
+.notice-text { flex: 1; min-width: 0; font-size: 14px; color: var(--muted); }
+.notice-text b { display: block; color: var(--text); font-weight: 600; margin-bottom: 2px; }
+.notice button { flex: none; padding: 8px 14px; border-radius: 10px; background: var(--debt); color: #fff; font-weight: 600; font-size: 14px; }
+a.list-btn { text-decoration: none; color: var(--accent); }
+.notice .notice-btn { flex: none; padding: 8px 14px; border-radius: 10px; background: var(--accent); color: #fff; font-weight: 600; font-size: 14px; text-decoration: none; }
